@@ -10,7 +10,13 @@ include(compilerconfig)
 include(defaults)
 include(helpers)
 
-add_library(${CMAKE_PROJECT_NAME} MODULE)
+add_library(${CMAKE_PROJECT_NAME} MODULE
+    src/plugin-main.cpp
+    src/sync-engine.cpp
+    src/sync-dock.cpp
+    src/audio-capture.cpp
+    src/calibration-source.cpp
+)
 
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
