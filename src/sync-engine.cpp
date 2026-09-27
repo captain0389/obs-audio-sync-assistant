@@ -115,9 +115,6 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
     double best = -1.0;
     int best_lag = 0;
 
-    // Find the strongest correlation peak first.  A real correlation peak
-    // naturally spans multiple adjacent samples, so the immediately
-    // neighboring samples must not be treated as a competing peak.
     for (int lag = -max_lag; lag <= max_lag; ++lag) {
         const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
         const double score = std::abs(A[idx]);
@@ -127,11 +124,14 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
         }
     }
 
-    constexpr int peak_exclusion_ms = 8;
-    const int peak_exclusion = std::max(1, peak_exclusion_ms * static_cast<int>(sample_rate) / 1000);
+    // A real correlation peak spans multiple neighboring samples. Exclude a
+    // small neighborhood around the winning peak before looking for a second
+    // competing peak; otherwise the peak's natural width is mistaken for
+    // ambiguity.
+    const int exclusion = std::max(1, static_cast<int>(sample_rate * 0.008));
     double second = -1.0;
     for (int lag = -max_lag; lag <= max_lag; ++lag) {
-        if (std::abs(lag - best_lag) <= peak_exclusion)
+        if (std::abs(lag - best_lag) <= exclusion)
             continue;
         const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
         second = std::max(second, std::abs(A[idx]));
@@ -158,12 +158,8 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
 
     // Confidence is intentionally conservative. A strong isolated peak gets
     // near 1.0; ambiguous peaks stay visibly lower.
-    // The peak ratio is now measured against a genuinely separate peak, not
-    // an adjacent sample from the same correlation lobe.  This makes the
-    // confidence metric meaningful for chirps and other short calibration
-    // signals.
-    out.confidence = std::clamp((out.peak_ratio - 1.05) / 0.45, 0.0, 1.0);
-    out.valid = best > 0.05 && out.confidence >= 0.20;
+    out.confidence = std::clamp((out.peak_ratio - 1.02) / 0.25, 0.0, 1.0);
+    out.valid = best > 0.05 && out.confidence >= 0.25;
     out.message = out.valid ? "Measurement complete." : "The correlation peak is ambiguous. Try a louder/cleaner signal.";
     return out;
 }

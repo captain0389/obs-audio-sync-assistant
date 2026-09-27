@@ -2,10 +2,8 @@
 #include <obs-frontend-api.h>
 
 #include <QPointer>
-#include <QString>
 
 #include "sync-dock.hpp"
-#include "calibration-source.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-audio-sync-assistant", "en-US")
@@ -18,15 +16,12 @@ static void show_dock()
     if (!dock)
         dock = new SyncDock();
 
-    if (!obs_frontend_add_dock_by_id(DOCK_ID, "Audio Sync Assistant", dock)) {
-        // Dock already exists. OBS will toggle it from the Docks menu.
+    if (!obs_frontend_add_dock_by_id(DOCK_ID, "Audio Sync Assistant", dock))
         return;
-    }
 }
 
 bool obs_module_load(void)
 {
-    calibration_source::register_source();
     obs_frontend_add_tools_menu_item("Audio Sync Assistant", [](void *) { show_dock(); }, nullptr);
     show_dock();
     blog(LOG_INFO, "Audio Sync Assistant loaded");

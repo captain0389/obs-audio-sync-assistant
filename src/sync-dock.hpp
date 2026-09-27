@@ -7,10 +7,38 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QProgressBar>
+#include <QSlider>
 #include <QWidget>
 
 #include <atomic>
 #include <thread>
+#include <vector>
+
+class WaveformWidget final : public QWidget {
+    Q_OBJECT
+public:
+    explicit WaveformWidget(QWidget *parent = nullptr);
+
+    void set_waveforms(const std::vector<float> &reference,
+                       const std::vector<float> &target,
+                       int sample_rate,
+                       double alignment_ms);
+    void set_alignment(double alignment_ms);
+    QSize minimumSizeHint() const override { return QSize(500, 220); }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    static void draw_waveform(QPainter &painter, const std::vector<float> &samples,
+                              int y_center, int height, double shift_samples,
+                              int sample_rate, int width);
+
+    std::vector<float> reference_;
+    std::vector<float> target_;
+    int sample_rate_ = 48000;
+    double alignment_ms_ = 0.0;
+};
 
 class SyncDock final : public QWidget {
     Q_OBJECT
@@ -22,16 +50,13 @@ private slots:
     void refresh_sources();
     void start_measurement();
     void apply_result();
-    void start_calibration();
-    void apply_calibration();
+    void alignment_slider_changed(int value);
 
 private:
     void stop_capture();
-    void stop_calibration_capture();
-    void cleanup_calibration_source();
     static bool enum_source(void *param, obs_source_t *source);
     void set_status(const QString &text);
-    void set_calibration_status(const QString &text);
+    void update_alignment_display();
 
     QComboBox *reference_combo_ = nullptr;
     QComboBox *target_combo_ = nullptr;
@@ -40,33 +65,22 @@ private:
     QPushButton *apply_button_ = nullptr;
     QLabel *result_label_ = nullptr;
     QLabel *confidence_label_ = nullptr;
+    QLabel *alignment_label_ = nullptr;
     QProgressBar *progress_ = nullptr;
-
-    QComboBox *calibration_mic_combo_ = nullptr;
-    QPushButton *calibration_button_ = nullptr;
-    QPushButton *apply_calibration_button_ = nullptr;
-    QLabel *calibration_result_label_ = nullptr;
-    QLabel *calibration_help_label_ = nullptr;
+    QSlider *alignment_slider_ = nullptr;
+    WaveformWidget *waveform_ = nullptr;
 
     AudioCaptureBuffer reference_buffer_;
     AudioCaptureBuffer target_buffer_;
     SourceAudioTap reference_tap_;
     SourceAudioTap target_tap_;
 
-    AudioCaptureBuffer calibration_buffer_;
-    AudioCaptureBuffer microphone_buffer_;
-    SourceAudioTap calibration_tap_;
-    SourceAudioTap microphone_tap_;
-
-    obs_source_t *calibration_source_ = nullptr;
-    obs_source_t *calibration_scene_ = nullptr;
-    obs_sceneitem_t *calibration_scene_item_ = nullptr;
-
     std::thread worker_;
     std::atomic<bool> cancel_{false};
 
     SyncResult last_result_;
-    SyncResult last_calibration_result_;
     QString target_name_;
-    QString calibration_mic_name_;
+    double selected_alignment_ms_ = 0.0;
+    double configured_difference_ms_ = 0.0;
+    bool has_recording_ = false;
 };
