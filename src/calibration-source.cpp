@@ -1,6 +1,7 @@
 #include "calibration-source.hpp"
 
 #include <obs.h>
+#include <util/platform.h>
 
 #include <algorithm>
 #include <atomic>
@@ -126,6 +127,7 @@ void thread_main(CalibrationData *data)
                 playing = true;
                 signal_pos = 0;
                 lead_remaining = LEAD_SILENCE_FRAMES;
+                timestamp = os_gettime_ns();
             }
         }
 
@@ -206,14 +208,7 @@ void destroy(void *opaque)
     delete data;
 }
 
-struct obs_source_info source_info = {
-    .id = calibration_source::SOURCE_ID,
-    .type = OBS_SOURCE_TYPE_INPUT,
-    .output_flags = OBS_SOURCE_AUDIO,
-    .get_name = get_name,
-    .create = create,
-    .destroy = destroy,
-};
+obs_source_info source_info = {};
 
 } // namespace
 
@@ -221,6 +216,13 @@ namespace calibration_source {
 
 void register_source()
 {
+    source_info.id = SOURCE_ID;
+    source_info.type = OBS_SOURCE_TYPE_INPUT;
+    source_info.output_flags = OBS_SOURCE_AUDIO;
+    source_info.get_name = get_name;
+    source_info.create = create;
+    source_info.destroy = destroy;
+
     obs_register_source(&source_info);
 }
 
