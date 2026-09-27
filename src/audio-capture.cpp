@@ -24,10 +24,11 @@ void AudioCaptureBuffer::push(const struct audio_data *data)
     if (!data || !active_.load() || data->frames == 0)
         return;
 
-    // Raw-mix capture requests mono float planar conversion, so the first
-    // plane contains the complete measurement signal.
-    const float *plane = reinterpret_cast<const float *>(data->data[0]);
-    if (!plane)
+    // OBS source capture audio is float planar. Mix available planes to mono.
+    int channels = 0;
+    while (channels < MAX_AV_PLANES && data->data[channels])
+        ++channels;
+    if (channels <= 0)
         return;
 
     std::lock_guard lock(mutex_);
@@ -41,7 +42,18 @@ void AudioCaptureBuffer::push(const struct audio_data *data)
     }
 
     samples_.reserve(std::min(max_samples_, samples_.size() + needed));
-    samples_.insert(samples_.end(), plane, plane + needed);
+    for (size_t i = 0; i < needed; ++i) {
+        double sum = 0.0;
+        int valid = 0;
+        for (int ch = 0; ch < channels; ++ch) {
+            const float *plane = reinterpret_cast<const float *>(data->data[ch]);
+            if (plane) {
+                sum += plane[i];
+                ++valid;
+            }
+        }
+        samples_.push_back(valid ? static_cast<float>(sum / valid) : 0.0f);
+    }
 }
 
 std::vector<float> AudioCaptureBuffer::snapshot(size_t max_samples) const
@@ -51,42 +63,37 @@ std::vector<float> AudioCaptureBuffer::snapshot(size_t max_samples) const
     return std::vector<float>(samples_.end() - static_cast<std::ptrdiff_t>(count), samples_.end());
 }
 
-RawMixAudioTap::~RawMixAudioTap()
+SourceAudioTap::~SourceAudioTap()
 {
     detach();
 }
 
-bool RawMixAudioTap::attach(size_t mix_idx, AudioCaptureBuffer *buffer, uint32_t sample_rate)
+bool SourceAudioTap::attach(obs_source_t *source, AudioCaptureBuffer *buffer)
 {
     detach();
-    if (!buffer || sample_rate == 0)
+    if (!source || !buffer)
         return false;
 
-    audio_convert_info conversion{};
-    conversion.samples_per_sec = sample_rate;
-    conversion.format = AUDIO_FORMAT_FLOAT_PLANAR;
-    conversion.speakers = SPEAKERS_MONO;
-
-    mix_idx_ = mix_idx;
+    source_ = obs_source_get_ref(source);
     buffer_ = buffer;
-    obs_add_raw_audio_callback(mix_idx_, &conversion, on_audio, this);
-    attached_ = true;
+    obs_source_add_audio_capture_callback(source_, on_audio, this);
     return true;
 }
 
-void RawMixAudioTap::detach()
+void SourceAudioTap::detach()
 {
-    if (attached_) {
-        obs_remove_raw_audio_callback(mix_idx_, on_audio, this);
-        attached_ = false;
+    if (source_) {
+        obs_source_remove_audio_capture_callback(source_, on_audio, this);
+        obs_source_release(source_);
+        source_ = nullptr;
     }
     buffer_ = nullptr;
 }
 
-void RawMixAudioTap::on_audio(void *param, size_t, struct audio_data *data)
+void SourceAudioTap::on_audio(void *param, obs_source_t *, const struct audio_data *data, bool muted)
 {
-    auto *tap = static_cast<RawMixAudioTap *>(param);
-    if (!tap || !tap->buffer_)
+    auto *tap = static_cast<SourceAudioTap *>(param);
+    if (!tap || muted || !tap->buffer_)
         return;
     tap->buffer_->push(data);
 }

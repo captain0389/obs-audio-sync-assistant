@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace {
 double sync_offset_ms(obs_source_t *source)
@@ -163,10 +164,9 @@ void SyncDock::start_measurement()
         return;
     }
 
-    // The source callback sees the raw signal before OBS applies the
-    // source's configured sync offset. We therefore capture the configured
-    // offsets at the same instant and fold their difference into the measured
-    // raw correlation result later.
+    // SourceAudioTap sees the raw source signal before OBS applies the
+    // source's configured sync offset. Capture those configured offsets at
+    // the same time and include their difference in the effective result.
     const double reference_sync_ms = sync_offset_ms(ref);
     const double target_sync_ms = sync_offset_ms(target);
     const double configured_difference_ms = target_sync_ms - reference_sync_ms;
@@ -191,7 +191,8 @@ void SyncDock::start_measurement()
 
     const int seconds = duration_combo_->currentData().toInt();
 
-    worker_ = std::thread([this, seconds, reference_sync_ms, target_sync_ms, configured_difference_ms] {
+    worker_ = std::thread([this, seconds, configured_difference_ms, reference_sync_ms,
+                           target_sync_ms] {
         const int total_ms = seconds * 1000;
 
         for (int elapsed = 0; elapsed < total_ms && !cancel_.load(); elapsed += 50) {
@@ -204,15 +205,21 @@ void SyncDock::start_measurement()
         reference_buffer_.stop();
         target_buffer_.stop();
 
-        const auto ref = reference_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
-        const auto target = target_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
+        const auto ref =
+            reference_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
+        const auto target =
+            target_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
 
-        // estimate_sync_gcc_phat() returns positive when the target waveform
-        // lags the reference waveform. A positive OBS sync offset delays a
-        // source, so target-reference sync offset is added to the raw result.
+        // sync-engine convention:
+        //   positive = target leads reference
+        //   negative = target lags reference
+        //
+        // A positive OBS Sync Offset delays the target, so it makes the target
+        // lag the reference. Therefore configured target-reference offset has
+        // the opposite sign in the sync-engine convention.
         SyncResult result = estimate_sync_gcc_phat(ref, target, 48000, 500);
         const double raw_offset_ms = result.offset_ms;
-        result.offset_ms = raw_offset_ms + configured_difference_ms;
+        result.offset_ms = raw_offset_ms - configured_difference_ms;
 
         QMetaObject::invokeMethod(
             this,
@@ -225,16 +232,15 @@ void SyncDock::start_measurement()
 
                 if (!result.valid) {
                     apply_button_->setEnabled(false);
-                    set_status(QString::fromUtf8(result.message ? result.message : "Measurement failed."));
+                    set_status(QString::fromUtf8(
+                        result.message ? result.message : "Measurement failed."));
                     confidence_label_->setText(
                         QString("Peak ratio: %1").arg(result.peak_ratio, 0, 'f', 2));
                     return;
                 }
 
                 const QString direction =
-                    result.offset_ms > 0.05
-                        ? "Target lags reference"
-                        : result.offset_ms < -0.05 ? "Target leads reference" : "Sources are aligned";
+                    result.offset_ms >= 0.0 ? "Target leads reference" : "Target lags reference";
 
                 if (std::abs(result.offset_ms) <= 0.05) {
                     set_status("Sources are aligned (0.00 ms)");
@@ -268,15 +274,17 @@ void SyncDock::apply_result()
     if (!target)
         return;
 
-    // If the target currently lags the reference by +X ms, its sync offset
-    // needs to be reduced by X ms. If it leads by -X ms, increase its offset.
+    // sync-engine convention:
+    // positive result = target leads, so delay target by that amount.
+    // negative result = target lags, so reduce target's delay.
+    const int64_t correction_ns =
+        static_cast<int64_t>(last_result_.offset_ms * 1000000.0);
     const int64_t current = obs_source_get_sync_offset(target);
-    const int64_t correction_ns = static_cast<int64_t>(last_result_.offset_ms * 1000000.0);
-    obs_source_set_sync_offset(target, current - correction_ns);
+    obs_source_set_sync_offset(target, current + correction_ns);
     obs_source_release(target);
 
     set_status(QString("Applied %1 ms correction to %2.")
-                   .arg(-last_result_.offset_ms, 0, 'f', 2)
+                   .arg(last_result_.offset_ms, 0, 'f', 2)
                    .arg(target_name_));
     apply_button_->setEnabled(false);
 }
