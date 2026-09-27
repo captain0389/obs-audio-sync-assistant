@@ -100,7 +100,7 @@ void WaveformWidget::paintEvent(QPaintEvent *)
     const int bottom = height() - 10;
     const int half = (bottom - top) / 2;
 
-    painter.setPen(palette().mid());
+    painter.setPen(palette().color(QPalette::Mid));
     painter.drawLine(0, top + half / 2, w, top + half / 2);
     painter.drawLine(0, top + half + half / 2, w, top + half + half / 2);
     painter.drawLine(w / 2, top, w / 2, bottom);
