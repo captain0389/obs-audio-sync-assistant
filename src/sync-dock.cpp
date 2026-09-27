@@ -4,11 +4,13 @@
 
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
 #include <QScrollArea>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QMetaObject>
 
 #include <algorithm>
@@ -26,13 +28,52 @@ double sync_offset_ms(obs_source_t *source)
 
 constexpr int SLIDER_MIN_MS = -500;
 constexpr int SLIDER_MAX_MS = 500;
+constexpr int ZOOM_SLIDER_MAX = 100;
+constexpr double MIN_ZOOM = 1.0;
+constexpr double MAX_ZOOM = 1000.0;
 
 } // namespace
 
 WaveformWidget::WaveformWidget(QWidget *parent) : QWidget(parent)
 {
-    setMinimumHeight(220);
+    setMinimumHeight(300);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+double WaveformWidget::total_duration_ms() const
+{
+    const size_t count = std::max(reference_.size(), target_.size());
+    if (count == 0 || sample_rate_ <= 0)
+        return 1.0;
+    return static_cast<double>(count) * 1000.0 / static_cast<double>(sample_rate_);
+}
+
+double WaveformWidget::visible_duration_ms() const
+{
+    return std::max(0.01, total_duration_ms() / zoom_factor_);
+}
+
+double WaveformWidget::clamp_center(double center_ms) const
+{
+    const double total = total_duration_ms();
+    const double visible = visible_duration_ms();
+    const double half_total = total / 2.0;
+    const double half_visible = visible / 2.0;
+    if (visible >= total)
+        return 0.0;
+    return std::clamp(center_ms, -half_total + half_visible,
+                      half_total - half_visible);
+}
+
+double WaveformWidget::time_at_x(double x) const
+{
+    const double visible = visible_duration_ms();
+    const double left = center_ms_ - visible / 2.0;
+    if (width() <= 1)
+        return center_ms_;
+    return left + (x / static_cast<double>(width() - 1)) * visible;
 }
 
 void WaveformWidget::set_waveforms(const std::vector<float> &reference,
@@ -44,6 +85,8 @@ void WaveformWidget::set_waveforms(const std::vector<float> &reference,
     target_ = target;
     sample_rate_ = sample_rate > 0 ? sample_rate : 48000;
     alignment_ms_ = alignment_ms;
+    zoom_factor_ = 1.0;
+    center_ms_ = 0.0;
     update();
 }
 
@@ -53,40 +96,93 @@ void WaveformWidget::set_alignment(double alignment_ms)
     update();
 }
 
+void WaveformWidget::set_zoom(double zoom_factor)
+{
+    const double old_visible = visible_duration_ms();
+    const double old_center = center_ms_;
+    zoom_factor_ = std::clamp(zoom_factor, MIN_ZOOM, MAX_ZOOM);
+    const double new_visible = visible_duration_ms();
+
+    // Preserve the current center while zooming. The mouse-wheel handler
+    // additionally adjusts the center so the point under the cursor stays put.
+    Q_UNUSED(old_visible);
+    Q_UNUSED(old_center);
+    center_ms_ = clamp_center(center_ms_);
+    update();
+}
+
+void WaveformWidget::fit_to_recording()
+{
+    zoom_factor_ = 1.0;
+    center_ms_ = 0.0;
+    update();
+}
+
+void WaveformWidget::set_center_ms(double center_ms)
+{
+    center_ms_ = clamp_center(center_ms);
+    update();
+}
+
 void WaveformWidget::draw_waveform(QPainter &painter,
                                    const std::vector<float> &samples,
-                                   int y_center, int height, double shift_samples,
+                                   int y_center, int height,
+                                   double display_shift_ms,
+                                   double view_start_ms, double view_end_ms,
                                    int sample_rate, int width)
 {
-    if (samples.empty() || width <= 0)
+    if (samples.empty() || width <= 0 || sample_rate <= 0 || view_end_ms <= view_start_ms)
         return;
 
-    const int count = static_cast<int>(samples.size());
-    const double center = static_cast<double>(count - 1) / 2.0;
-    const double px_per_sample = static_cast<double>(width) / static_cast<double>(count);
+    const double ms_per_sample = 1000.0 / static_cast<double>(sample_rate);
+    const double view_duration = view_end_ms - view_start_ms;
+    const double samples_per_pixel =
+        view_duration * static_cast<double>(sample_rate) /
+        (1000.0 * static_cast<double>(width));
+    const double center_sample = static_cast<double>(samples.size() - 1) / 2.0;
+
+    // Convert a timeline position to a raw sample position. A positive
+    // display shift moves the target waveform to the right, representing a
+    // delay applied to the target.
+    const auto sample_at_time = [&](double timeline_ms) {
+        const double raw_ms = timeline_ms - display_shift_ms;
+        return center_sample + raw_ms / ms_per_sample;
+    };
+
+    QPainterPath path;
+    path.reserve(width * 2);
 
     for (int x = 0; x < width; ++x) {
-        const double relative = (static_cast<double>(x) - width / 2.0) / px_per_sample;
-        const double sample_pos = center + relative - shift_samples;
-        const int i = static_cast<int>(std::floor(sample_pos));
-        if (i < 0 || i >= count)
+        const double t0 = view_start_ms +
+            (static_cast<double>(x) / static_cast<double>(width)) * view_duration;
+        const double t1 = view_start_ms +
+            (static_cast<double>(x + 1) / static_cast<double>(width)) * view_duration;
+        double a = sample_at_time(t0);
+        double b = sample_at_time(t1);
+        if (a > b)
+            std::swap(a, b);
+
+        const int first = std::max(0, static_cast<int>(std::floor(a)));
+        const int last = std::min(static_cast<int>(samples.size()) - 1,
+                                  static_cast<int>(std::ceil(b)));
+        if (first > last)
             continue;
 
-        const int span = std::max(1, static_cast<int>(std::ceil(1.0 / px_per_sample)));
-        const int end = std::min(count, i + span);
         float min_v = 1.0f;
         float max_v = -1.0f;
-        for (int j = i; j < end; ++j) {
-            min_v = std::min(min_v, samples[static_cast<size_t>(j)]);
-            max_v = std::max(max_v, samples[static_cast<size_t>(j)]);
+        for (int i = first; i <= last; ++i) {
+            min_v = std::min(min_v, samples[static_cast<size_t>(i)]);
+            max_v = std::max(max_v, samples[static_cast<size_t>(i)]);
         }
 
-        const int y1 = y_center - static_cast<int>(max_v * height * 0.45f);
-        const int y2 = y_center - static_cast<int>(min_v * height * 0.45f);
-        painter.drawLine(x, y1, x, y2);
+        const double y1 = y_center - static_cast<double>(max_v) * height * 0.45;
+        const double y2 = y_center - static_cast<double>(min_v) * height * 0.45;
+        const double xd = static_cast<double>(x);
+        path.moveTo(xd, y1);
+        path.lineTo(xd, y2);
     }
 
-    Q_UNUSED(sample_rate);
+    painter.drawPath(path);
 }
 
 void WaveformWidget::paintEvent(QPaintEvent *)
@@ -96,33 +192,145 @@ void WaveformWidget::paintEvent(QPaintEvent *)
     painter.fillRect(rect(), palette().base());
 
     const int w = width();
-    const int top = 40;
-    const int bottom = height() - 10;
-    const int half = (bottom - top) / 2;
+    const int top = 52;
+    const int bottom = height() - 24;
+    const int half = std::max(40, (bottom - top) / 2);
+    const int ref_center = top + half / 2;
+    const int target_center = top + half + half / 2;
 
-    painter.setPen(palette().color(QPalette::Mid));
-    painter.drawLine(0, top + half / 2, w, top + half / 2);
-    painter.drawLine(0, top + half + half / 2, w, top + half + half / 2);
-    painter.drawLine(w / 2, top, w / 2, bottom);
+    painter.setPen(palette().mid());
+    painter.drawLine(0, ref_center, w, ref_center);
+    painter.drawLine(0, target_center, w, target_center);
+
+    if (reference_.empty() || target_.empty()) {
+        painter.setPen(palette().text().color());
+        painter.drawText(8, height() / 2, "Record two sources to display their waveforms.");
+        return;
+    }
+
+    const double visible = visible_duration_ms();
+    const double view_start = center_ms_ - visible / 2.0;
+    const double view_end = center_ms_ + visible / 2.0;
+
+    // Time ruler. At high zoom this naturally reaches sub-millisecond detail.
+    const double ideal_major = visible / 10.0;
+    const double bases[] = {0.001, 0.002, 0.005, 0.01, 0.02, 0.05,
+                            0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0,
+                            50.0, 100.0, 200.0, 500.0, 1000.0};
+    double major = bases[0];
+    for (double candidate : bases) {
+        if (candidate >= ideal_major) {
+            major = candidate;
+            break;
+        }
+        major = candidate;
+    }
+
+    painter.setPen(QPen(palette().mid(), 1));
+    const double first_tick = std::floor(view_start / major) * major;
+    for (double t = first_tick; t <= view_end + major; t += major) {
+        if (t < view_start || t > view_end)
+            continue;
+        const double x = (t - view_start) / visible * w;
+        painter.drawLine(QPointF(x, 30), QPointF(x, 45));
+        const QString label = QString("%1 ms").arg(t, 0, 'f', major < 1.0 ? 3 : 1);
+        painter.drawText(QPointF(x + 3, 25), label);
+    }
+
+    // Strong center/reference line.
+    painter.setPen(QPen(palette().mid(), 1, Qt::DashLine));
+    const double center_x = (0.0 - view_start) / visible * w;
+    if (center_x >= 0.0 && center_x <= w)
+        painter.drawLine(QPointF(center_x, top), QPointF(center_x, bottom));
 
     painter.setPen(palette().text().color());
     painter.drawText(8, 18, "Reference");
     painter.drawText(8, top + half + 18, "Target");
 
+    painter.setPen(QPen(palette().text().color(), 1));
+    draw_waveform(painter, reference_, ref_center, half,
+                  0.0, view_start, view_end, sample_rate_, w);
+
+    painter.setPen(QPen(palette().highlight().color(), 1));
+    draw_waveform(painter, target_, target_center, half,
+                  alignment_ms_, view_start, view_end, sample_rate_, w);
+
+    painter.setPen(QPen(palette().highlight().color(), 2));
+    if (center_x >= 0.0 && center_x <= w)
+        painter.drawLine(QPointF(center_x, top), QPointF(center_x, bottom));
+
+    painter.setPen(palette().text().color());
+    const QString zoom_text = QString("%1x  •  %2 ms visible  •  Wheel: zoom  •  Drag: pan")
+        .arg(zoom_factor_, 0, 'f', zoom_factor_ < 10.0 ? 1 : 0)
+        .arg(visible, 0, 'f', visible < 1.0 ? 3 : 1);
+    painter.drawText(8, height() - 7, zoom_text);
+}
+
+void WaveformWidget::wheelEvent(QWheelEvent *event)
+{
     if (reference_.empty() || target_.empty()) {
-        painter.drawText(8, height() / 2, "Record two sources to display their waveforms.");
+        event->ignore();
         return;
     }
 
-    const double shift_samples = alignment_ms_ * sample_rate_ / 1000.0;
+    const QPointF pos = event->position();
+    const double anchor_time = time_at_x(pos.x());
+    const double factor = event->angleDelta().y() > 0 ? 1.35 : 1.0 / 1.35;
+    const double new_zoom = std::clamp(zoom_factor_ * factor, MIN_ZOOM, MAX_ZOOM);
 
-    painter.setPen(QPen(palette().text().color(), 1));
-    draw_waveform(painter, reference_, top + half / 2, half, 0.0,
-                  sample_rate_, w);
+    if (std::abs(new_zoom - zoom_factor_) < 1e-9) {
+        event->accept();
+        return;
+    }
 
-    painter.setPen(QPen(palette().highlight().color(), 1));
-    draw_waveform(painter, target_, top + half + half / 2, half,
-                  shift_samples, sample_rate_, w);
+    zoom_factor_ = new_zoom;
+    const double visible = visible_duration_ms();
+    const double normalized_x = width() > 1
+        ? pos.x() / static_cast<double>(width() - 1)
+        : 0.5;
+    center_ms_ = anchor_time - (normalized_x - 0.5) * visible;
+    center_ms_ = clamp_center(center_ms_);
+    update();
+    event->accept();
+}
+
+void WaveformWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && !reference_.empty()) {
+        dragging_ = true;
+        last_mouse_pos_ = event->pos();
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void WaveformWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (!dragging_) {
+        QWidget::mouseMoveEvent(event);
+        return;
+    }
+
+    const double visible = visible_duration_ms();
+    const double delta_px = static_cast<double>(event->pos().x() - last_mouse_pos_.x());
+    center_ms_ -= delta_px / std::max(1, width()) * visible;
+    center_ms_ = clamp_center(center_ms_);
+    last_mouse_pos_ = event->pos();
+    update();
+    event->accept();
+}
+
+void WaveformWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && dragging_) {
+        dragging_ = false;
+        unsetCursor();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
 }
 
 SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
@@ -182,7 +390,7 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
     waveform_ = new WaveformWidget();
     wave_layout->addWidget(waveform_);
 
-    alignment_label_ = new QLabel("Alignment: 0.00 ms");
+    alignment_label_ = new QLabel("Alignment: 0.00 ms (0.0 samples)");
     alignment_label_->setAlignment(Qt::AlignCenter);
     wave_layout->addWidget(alignment_label_);
 
@@ -192,11 +400,30 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
     alignment_slider_->setSingleStep(1);
     alignment_slider_->setPageStep(10);
     alignment_slider_->setEnabled(false);
+    alignment_slider_->setToolTip("Fine alignment in milliseconds. Use the waveform zoom for visual precision.");
     wave_layout->addWidget(alignment_slider_);
 
+    auto *zoom_row = new QHBoxLayout();
+    zoom_row->addWidget(new QLabel("Waveform zoom:"));
+    zoom_slider_ = new QSlider(Qt::Horizontal);
+    zoom_slider_->setRange(0, ZOOM_SLIDER_MAX);
+    zoom_slider_->setValue(0);
+    zoom_slider_->setEnabled(false);
+    zoom_slider_->setToolTip("Zoom from the complete recording down to a few milliseconds.");
+    zoom_row->addWidget(zoom_slider_, 1);
+    zoom_label_ = new QLabel("1.0x");
+    zoom_label_->setMinimumWidth(90);
+    zoom_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    zoom_row->addWidget(zoom_label_);
+    fit_button_ = new QPushButton("Fit to recording");
+    fit_button_->setEnabled(false);
+    zoom_row->addWidget(fit_button_);
+    wave_layout->addLayout(zoom_row);
+
     auto *hint = new QLabel(
-        "Positive values delay the target. Drag the slider until the two "
-        "waveforms visually line up, then apply the correction.");
+        "Positive values delay the target. Use the mouse wheel over the waveform to zoom in/out, "
+        "and drag left/right to pan. At maximum zoom only a few milliseconds of audio are visible. "
+        "Line up matching waveform features, then apply the correction.");
     hint->setWordWrap(true);
     wave_layout->addWidget(hint);
 
@@ -219,6 +446,10 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
             &SyncDock::apply_result);
     connect(alignment_slider_, &QSlider::valueChanged, this,
             &SyncDock::alignment_slider_changed);
+    connect(zoom_slider_, &QSlider::valueChanged, this,
+            &SyncDock::zoom_slider_changed);
+    connect(fit_button_, &QPushButton::clicked, this,
+            &SyncDock::fit_waveform);
 
     refresh_sources();
 }
@@ -294,6 +525,8 @@ void SyncDock::start_measurement()
     cancel_.store(false);
     apply_button_->setEnabled(false);
     alignment_slider_->setEnabled(false);
+    zoom_slider_->setEnabled(false);
+    fit_button_->setEnabled(false);
     measure_button_->setEnabled(false);
     has_recording_ = false;
     progress_->setValue(0);
@@ -371,6 +604,8 @@ void SyncDock::start_measurement()
                 has_recording_ = !ref.empty() && !target.empty();
                 if (!has_recording_) {
                     alignment_slider_->setEnabled(false);
+                    zoom_slider_->setEnabled(false);
+                    fit_button_->setEnabled(false);
                     apply_button_->setEnabled(false);
                     set_status("No usable audio was captured from one or both sources.");
                     confidence_label_->clear();
@@ -384,12 +619,15 @@ void SyncDock::start_measurement()
                 alignment_slider_->setValue(static_cast<int>(std::lround(selected_alignment_ms_)));
                 alignment_slider_->blockSignals(false);
                 alignment_slider_->setEnabled(true);
-                // The waveform view represents the final OBS timing: the
-                // configured target-reference sync offset is already part of
-                // the displayed target shift, while the slider is the new
-                // correction the user is choosing.
+                zoom_slider_->setEnabled(true);
+                fit_button_->setEnabled(true);
+
                 waveform_->set_waveforms(ref, target, 48000,
                                          configured_difference_ms_ + selected_alignment_ms_);
+                zoom_slider_->blockSignals(true);
+                zoom_slider_->setValue(0);
+                zoom_slider_->blockSignals(false);
+                zoom_label_->setText("1.0x");
                 update_alignment_display();
 
                 if (result.valid) {
@@ -400,7 +638,7 @@ void SyncDock::start_measurement()
                                    .arg(direction)
                                    .arg(std::abs(result.offset_ms), 0, 'f', 2));
                 } else {
-                    set_status("Automatic alignment was inconclusive. The waveforms were captured successfully; use the slider to align them manually.");
+                    set_status("Automatic alignment was inconclusive. The waveforms were captured successfully; use zoom and the slider to align them manually.");
                 }
                 confidence_label_->setText(
                     QString("Confidence: %1%  •  %2 samples analyzed  •  Raw: %3 ms  •  Configured target-reference: %4 ms")
@@ -427,6 +665,43 @@ void SyncDock::update_alignment_display()
             .arg(selected_alignment_ms_ * 48.0, 0, 'f', 1));
     waveform_->set_alignment(configured_difference_ms_ + selected_alignment_ms_);
     apply_button_->setEnabled(has_recording_);
+}
+
+double SyncDock::zoom_from_slider(int value)
+{
+    const double normalized = std::clamp(value, 0, ZOOM_SLIDER_MAX) /
+                              static_cast<double>(ZOOM_SLIDER_MAX);
+    return std::pow(MAX_ZOOM / MIN_ZOOM, normalized) * MIN_ZOOM;
+}
+
+int SyncDock::slider_from_zoom(double zoom)
+{
+    const double normalized = std::log(std::clamp(zoom, MIN_ZOOM, MAX_ZOOM) / MIN_ZOOM) /
+                              std::log(MAX_ZOOM / MIN_ZOOM);
+    return static_cast<int>(std::lround(normalized * ZOOM_SLIDER_MAX));
+}
+
+QString SyncDock::zoom_text(double zoom)
+{
+    if (zoom < 10.0)
+        return QString("%1x").arg(zoom, 0, 'f', 1);
+    return QString("%1x").arg(zoom, 0, 'f', 0);
+}
+
+void SyncDock::zoom_slider_changed(int value)
+{
+    const double zoom = zoom_from_slider(value);
+    waveform_->set_zoom(zoom);
+    zoom_label_->setText(zoom_text(zoom));
+}
+
+void SyncDock::fit_waveform()
+{
+    waveform_->fit_to_recording();
+    zoom_slider_->blockSignals(true);
+    zoom_slider_->setValue(slider_from_zoom(1.0));
+    zoom_slider_->blockSignals(false);
+    zoom_label_->setText("1.0x");
 }
 
 void SyncDock::apply_result()
