@@ -198,7 +198,7 @@ void WaveformWidget::paintEvent(QPaintEvent *)
     const int ref_center = top + half / 2;
     const int target_center = top + half + half / 2;
 
-    painter.setPen(palette().mid());
+    painter.setPen(palette().mid().color());
     painter.drawLine(0, ref_center, w, ref_center);
     painter.drawLine(0, target_center, w, target_center);
 
