@@ -1,7 +1,6 @@
 #include "calibration-source.hpp"
 
 #include <obs.h>
-#include <util/platform.h>
 
 #include <algorithm>
 #include <atomic>
@@ -45,7 +44,7 @@ std::vector<float> make_signal()
     out.reserve(sweep_frames + gap_frames + sweep_frames);
 
     auto append_sweep = [&](double start_hz, double end_hz) {
-        constexpr double amplitude = 0.22; // approximately -13 dBFS
+        constexpr double amplitude = 0.40; // approximately -8 dBFS, still well below digital clipping
         constexpr double fade_ms = 5.0;
         const size_t fade_frames =
             static_cast<size_t>(SAMPLE_RATE * fade_ms / 1000.0);
@@ -127,10 +126,6 @@ void thread_main(CalibrationData *data)
                 playing = true;
                 signal_pos = 0;
                 lead_remaining = LEAD_SILENCE_FRAMES;
-                // Use OBS' monotonic clock for audio timestamps. Starting at
-                // timestamp 0 can make OBS treat the generated samples as
-                // stale and prevent them from reaching the monitor path.
-                timestamp = os_gettime_ns();
             }
         }
 
@@ -161,8 +156,9 @@ void thread_main(CalibrationData *data)
             static_cast<uint64_t>(BLOCK_FRAMES) * 1000000000ULL /
             SAMPLE_RATE;
 
-        // Keep output on a real-time 10 ms cadence. Timestamps advance on the
-        // same OBS monotonic clock so the audio pipeline can place samples.
+        // Keep output on a real-time 10 ms cadence.  The OBS test sine source
+        // follows the same model; timestamps alone should not be used to
+        // flood the audio pipeline with future samples.
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -210,7 +206,14 @@ void destroy(void *opaque)
     delete data;
 }
 
-obs_source_info source_info = {};
+struct obs_source_info source_info = {
+    .id = calibration_source::SOURCE_ID,
+    .type = OBS_SOURCE_TYPE_INPUT,
+    .output_flags = OBS_SOURCE_AUDIO,
+    .get_name = get_name,
+    .create = create,
+    .destroy = destroy,
+};
 
 } // namespace
 
@@ -218,15 +221,6 @@ namespace calibration_source {
 
 void register_source()
 {
-    // OBS Audio Sync Assistant is built with C++17 by the official OBS
-    // plugin template, so avoid C++20 designated initializers here.
-    source_info.id = SOURCE_ID;
-    source_info.type = OBS_SOURCE_TYPE_INPUT;
-    source_info.output_flags = OBS_SOURCE_AUDIO;
-    source_info.get_name = get_name;
-    source_info.create = create;
-    source_info.destroy = destroy;
-
     obs_register_source(&source_info);
 }
 

@@ -116,16 +116,28 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
     double second = -1.0;
     int best_lag = 0;
 
+    // Do not treat the immediate samples around the winning correlation peak
+    // as a separate competing peak. A real audio correlation peak naturally
+    // spans several samples, especially for broadband calibration signals.
+    // The old implementation compared adjacent samples, which made the
+    // confidence ratio artificially close to 1.0 and caused valid calibration
+    // measurements to be rejected unless the signal was extremely loud.
+    constexpr int peak_exclusion_samples = 240; // 5 ms at 48 kHz
+
     for (int lag = -max_lag; lag <= max_lag; ++lag) {
         const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
         const double score = std::abs(A[idx]);
         if (score > best) {
-            second = best;
             best = score;
             best_lag = lag;
-        } else if (score > second) {
-            second = score;
         }
+    }
+
+    for (int lag = -max_lag; lag <= max_lag; ++lag) {
+        if (std::abs(lag - best_lag) <= peak_exclusion_samples)
+            continue;
+        const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
+        second = std::max(second, std::abs(A[idx]));
     }
 
     // Refine the peak to sub-sample precision with a 3-point parabolic fit.
