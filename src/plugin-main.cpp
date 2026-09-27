@@ -5,6 +5,7 @@
 #include <QString>
 
 #include "sync-dock.hpp"
+#include "calibration-source.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-audio-sync-assistant", "en-US")
@@ -25,6 +26,7 @@ static void show_dock()
 
 bool obs_module_load(void)
 {
+    calibration_source::register_source();
     obs_frontend_add_tools_menu_item("Audio Sync Assistant", [](void *) { show_dock(); }, nullptr);
     show_dock();
     blog(LOG_INFO, "Audio Sync Assistant loaded");
