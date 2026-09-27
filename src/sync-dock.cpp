@@ -11,21 +11,12 @@
 #include <chrono>
 
 namespace {
-constexpr size_t kMaxAudioMixes = 6;
-
-size_t bit_index(uint32_t bit)
+double sync_offset_ms(obs_source_t *source)
 {
-    size_t index = 0;
-    while (bit > 1) {
-        bit >>= 1;
-        ++index;
-    }
-    return index;
+    if (!source)
+        return 0.0;
+    return static_cast<double>(obs_source_get_sync_offset(source)) / 1000000.0;
 }
-
-struct MixerScan {
-    uint32_t used = 0;
-};
 } // namespace
 
 SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
@@ -116,18 +107,6 @@ bool SyncDock::enum_source(void *param, obs_source_t *source)
     return true;
 }
 
-bool SyncDock::enum_used_mixers(void *param, obs_source_t *source)
-{
-    auto *scan = static_cast<MixerScan *>(param);
-    if (!scan || !source)
-        return true;
-
-    const uint32_t flags = obs_source_get_output_flags(source);
-    if (flags & OBS_SOURCE_AUDIO)
-        scan->used |= obs_source_get_audio_mixers(source);
-    return true;
-}
-
 void SyncDock::refresh_sources()
 {
     reference_combo_->clear();
@@ -137,83 +116,12 @@ void SyncDock::refresh_sources()
         target_combo_->setCurrentIndex(1);
 }
 
-bool SyncDock::setup_probe_routing(obs_source_t *reference, obs_source_t *target)
-{
-    MixerScan scan;
-    obs_enum_sources(enum_used_mixers, &scan);
-
-    uint32_t free_bits[kMaxAudioMixes] = {};
-    size_t free_count = 0;
-    for (size_t i = 0; i < kMaxAudioMixes; ++i) {
-        const uint32_t bit = 1u << static_cast<uint32_t>(i);
-        if (!(scan.used & bit))
-            free_bits[free_count++] = bit;
-    }
-
-    if (free_count < 2) {
-        set_status("Need two unused OBS audio tracks for measurement. Free two mixer tracks and try again.");
-        return false;
-    }
-
-    obs_audio_info audio_info{};
-    if (obs_get_audio_info(&audio_info) && audio_info.samples_per_sec > 0)
-        sample_rate_ = audio_info.samples_per_sec;
-    else
-        sample_rate_ = 48000;
-
-    reference_source_ = obs_source_get_ref(reference);
-    target_source_ = obs_source_get_ref(target);
-    if (!reference_source_ || !target_source_) {
-        restore_probe_routing();
-        set_status("Could not retain the selected sources for measurement.");
-        return false;
-    }
-
-    reference_original_mixers_ = obs_source_get_audio_mixers(reference_source_);
-    target_original_mixers_ = obs_source_get_audio_mixers(target_source_);
-    reference_probe_bit_ = free_bits[0];
-    target_probe_bit_ = free_bits[1];
-
-    // Keep the user's existing track routing intact and add each source to a
-    // temporarily unused track. Because the probe tracks were unused by every
-    // audio source, each raw-mix callback contains only its selected source.
-    obs_source_set_audio_mixers(reference_source_, reference_original_mixers_ | reference_probe_bit_);
-    obs_source_set_audio_mixers(target_source_, target_original_mixers_ | target_probe_bit_);
-    probe_routing_active_ = true;
-    return true;
-}
-
-void SyncDock::restore_probe_routing()
-{
-    reference_tap_.detach();
-    target_tap_.detach();
-
-    if (probe_routing_active_) {
-        if (reference_source_)
-            obs_source_set_audio_mixers(reference_source_, reference_original_mixers_);
-        if (target_source_)
-            obs_source_set_audio_mixers(target_source_, target_original_mixers_);
-    }
-
-    if (reference_source_) {
-        obs_source_release(reference_source_);
-        reference_source_ = nullptr;
-    }
-    if (target_source_) {
-        obs_source_release(target_source_);
-        target_source_ = nullptr;
-    }
-
-    reference_probe_bit_ = 0;
-    target_probe_bit_ = 0;
-    probe_routing_active_ = false;
-}
-
 void SyncDock::stop_capture()
 {
     reference_buffer_.stop();
     target_buffer_.stop();
-    restore_probe_routing();
+    reference_tap_.detach();
+    target_tap_.detach();
 }
 
 void SyncDock::start_measurement()
@@ -223,6 +131,7 @@ void SyncDock::start_measurement()
         set_status("Select two audio sources first.");
         return;
     }
+
     if (reference_combo_->currentData() == target_combo_->currentData()) {
         set_status("Reference and target must be different sources.");
         return;
@@ -235,11 +144,15 @@ void SyncDock::start_measurement()
     apply_button_->setEnabled(false);
     measure_button_->setEnabled(false);
     progress_->setValue(0);
-    set_status("Preparing isolated post-sync audio tracks…");
+    set_status("Listening for shared audio…");
     confidence_label_->clear();
 
-    obs_source_t *ref = obs_get_source_by_uuid(reference_combo_->currentData().toString().toUtf8().constData());
-    obs_source_t *target = obs_get_source_by_uuid(target_combo_->currentData().toString().toUtf8().constData());
+    const QByteArray ref_uuid = reference_combo_->currentData().toString().toUtf8();
+    const QByteArray target_uuid = target_combo_->currentData().toString().toUtf8();
+
+    obs_source_t *ref = obs_get_source_by_uuid(ref_uuid.constData());
+    obs_source_t *target = obs_get_source_by_uuid(target_uuid.constData());
+
     if (!ref || !target) {
         if (ref)
             obs_source_release(ref);
@@ -250,23 +163,21 @@ void SyncDock::start_measurement()
         return;
     }
 
+    // The source callback sees the raw signal before OBS applies the
+    // source's configured sync offset. We therefore capture the configured
+    // offsets at the same instant and fold their difference into the measured
+    // raw correlation result later.
+    const double reference_sync_ms = sync_offset_ms(ref);
+    const double target_sync_ms = sync_offset_ms(target);
+    const double configured_difference_ms = target_sync_ms - reference_sync_ms;
+
     target_name_ = target_combo_->currentText();
+
     reference_buffer_.start();
     target_buffer_.start();
 
-    if (!setup_probe_routing(ref, target)) {
-        reference_buffer_.stop();
-        target_buffer_.stop();
-        obs_source_release(ref);
-        obs_source_release(target);
-        measure_button_->setEnabled(true);
-        return;
-    }
-
-    const bool ref_attached = reference_tap_.attach(
-        bit_index(reference_probe_bit_), &reference_buffer_, sample_rate_);
-    const bool target_attached = target_tap_.attach(
-        bit_index(target_probe_bit_), &target_buffer_, sample_rate_);
+    const bool ref_attached = reference_tap_.attach(ref, &reference_buffer_);
+    const bool target_attached = target_tap_.attach(target, &target_buffer_);
 
     obs_source_release(ref);
     obs_source_release(target);
@@ -274,49 +185,76 @@ void SyncDock::start_measurement()
     if (!ref_attached || !target_attached) {
         stop_capture();
         measure_button_->setEnabled(true);
-        set_status("Could not attach to the temporary OBS measurement tracks.");
+        set_status("Could not attach to one of the selected audio sources.");
         return;
     }
 
-    set_status("Listening to post-sync audio…");
     const int seconds = duration_combo_->currentData().toInt();
-    const uint32_t sample_rate = sample_rate_;
-    worker_ = std::thread([this, seconds, sample_rate] {
+
+    worker_ = std::thread([this, seconds, reference_sync_ms, target_sync_ms, configured_difference_ms] {
         const int total_ms = seconds * 1000;
+
         for (int elapsed = 0; elapsed < total_ms && !cancel_.load(); elapsed += 50) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             const int pct = std::min(100, elapsed * 100 / total_ms);
-            QMetaObject::invokeMethod(this, [this, pct] { progress_->setValue(pct); }, Qt::QueuedConnection);
+            QMetaObject::invokeMethod(this, [this, pct] { progress_->setValue(pct); },
+                                      Qt::QueuedConnection);
         }
 
         reference_buffer_.stop();
         target_buffer_.stop();
-        const auto ref = reference_buffer_.snapshot(static_cast<size_t>(seconds) * sample_rate);
-        const auto target = target_buffer_.snapshot(static_cast<size_t>(seconds) * sample_rate);
-        const SyncResult result = estimate_sync_gcc_phat(ref, target, sample_rate, 500);
 
-        // OBS state changes must happen on the frontend thread. Queue cleanup
-        // and result presentation together so the temporary tracks are removed
-        // before the user can start another measurement.
-        QMetaObject::invokeMethod(this, [this, result] {
-            stop_capture();
-            last_result_ = result;
-            measure_button_->setEnabled(true);
-            progress_->setValue(100);
-            if (!result.valid) {
-                apply_button_->setEnabled(false);
-                set_status(QString::fromUtf8(result.message ? result.message : "Measurement failed."));
-                confidence_label_->setText(QString("Peak ratio: %1").arg(result.peak_ratio, 0, 'f', 2));
-                return;
-            }
+        const auto ref = reference_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
+        const auto target = target_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
 
-            const QString direction = result.offset_ms >= 0.0 ? "Target leads reference" : "Target lags reference";
-            set_status(QString("%1 by %2 ms").arg(direction).arg(std::abs(result.offset_ms), 0, 'f', 2));
-            confidence_label_->setText(QString("Confidence: %1%  •  %2 samples analyzed")
-                .arg(result.confidence * 100.0, 0, 'f', 0)
-                .arg(result.samples_used));
-            apply_button_->setEnabled(true);
-        }, Qt::QueuedConnection);
+        // estimate_sync_gcc_phat() returns positive when the target waveform
+        // lags the reference waveform. A positive OBS sync offset delays a
+        // source, so target-reference sync offset is added to the raw result.
+        SyncResult result = estimate_sync_gcc_phat(ref, target, 48000, 500);
+        const double raw_offset_ms = result.offset_ms;
+        result.offset_ms = raw_offset_ms + configured_difference_ms;
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, result, raw_offset_ms, reference_sync_ms, target_sync_ms] {
+                stop_capture();
+
+                last_result_ = result;
+                measure_button_->setEnabled(true);
+                progress_->setValue(100);
+
+                if (!result.valid) {
+                    apply_button_->setEnabled(false);
+                    set_status(QString::fromUtf8(result.message ? result.message : "Measurement failed."));
+                    confidence_label_->setText(
+                        QString("Peak ratio: %1").arg(result.peak_ratio, 0, 'f', 2));
+                    return;
+                }
+
+                const QString direction =
+                    result.offset_ms > 0.05
+                        ? "Target lags reference"
+                        : result.offset_ms < -0.05 ? "Target leads reference" : "Sources are aligned";
+
+                if (std::abs(result.offset_ms) <= 0.05) {
+                    set_status("Sources are aligned (0.00 ms)");
+                } else {
+                    set_status(QString("%1 by %2 ms")
+                                   .arg(direction)
+                                   .arg(std::abs(result.offset_ms), 0, 'f', 2));
+                }
+
+                confidence_label_->setText(
+                    QString("Confidence: %1%  •  %2 samples analyzed  •  Raw: %3 ms  •  "
+                            "Configured target-reference: %4 ms")
+                        .arg(result.confidence * 100.0, 0, 'f', 0)
+                        .arg(result.samples_used)
+                        .arg(raw_offset_ms, 0, 'f', 2)
+                        .arg(target_sync_ms - reference_sync_ms, 0, 'f', 2));
+
+                apply_button_->setEnabled(true);
+            },
+            Qt::QueuedConnection);
     });
 }
 
@@ -330,11 +268,15 @@ void SyncDock::apply_result()
     if (!target)
         return;
 
-    const int64_t delta_ns = static_cast<int64_t>(last_result_.offset_ms * 1000000.0);
+    // If the target currently lags the reference by +X ms, its sync offset
+    // needs to be reduced by X ms. If it leads by -X ms, increase its offset.
     const int64_t current = obs_source_get_sync_offset(target);
-    obs_source_set_sync_offset(target, current + delta_ns);
+    const int64_t correction_ns = static_cast<int64_t>(last_result_.offset_ms * 1000000.0);
+    obs_source_set_sync_offset(target, current - correction_ns);
     obs_source_release(target);
 
-    set_status(QString("Applied %1 ms to %2.").arg(last_result_.offset_ms, 0, 'f', 2).arg(target_name_));
+    set_status(QString("Applied %1 ms correction to %2.")
+                   .arg(-last_result_.offset_ms, 0, 'f', 2)
+                   .arg(target_name_));
     apply_button_->setEnabled(false);
 }
