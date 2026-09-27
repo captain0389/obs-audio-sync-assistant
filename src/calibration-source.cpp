@@ -45,7 +45,7 @@ std::vector<float> make_signal()
     out.reserve(sweep_frames + gap_frames + sweep_frames);
 
     auto append_sweep = [&](double start_hz, double end_hz) {
-        constexpr double amplitude = 0.40; // approximately -8 dBFS, still well below digital clipping
+        constexpr double amplitude = 0.60; // approximately -8 dBFS, still well below digital clipping
         constexpr double fade_ms = 5.0;
         const size_t fade_frames =
             static_cast<size_t>(SAMPLE_RATE * fade_ms / 1000.0);

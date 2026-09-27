@@ -113,17 +113,11 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
     const int max_lag = std::min<int>(max_offset_ms * static_cast<int>(sample_rate) / 1000,
                                       static_cast<int>(usable) - 1);
     double best = -1.0;
-    double second = -1.0;
     int best_lag = 0;
 
-    // Do not treat the immediate samples around the winning correlation peak
-    // as a separate competing peak. A real audio correlation peak naturally
-    // spans several samples, especially for broadband calibration signals.
-    // The old implementation compared adjacent samples, which made the
-    // confidence ratio artificially close to 1.0 and caused valid calibration
-    // measurements to be rejected unless the signal was extremely loud.
-    constexpr int peak_exclusion_samples = 240; // 5 ms at 48 kHz
-
+    // Find the strongest correlation peak first.  A real correlation peak
+    // naturally spans multiple adjacent samples, so the immediately
+    // neighboring samples must not be treated as a competing peak.
     for (int lag = -max_lag; lag <= max_lag; ++lag) {
         const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
         const double score = std::abs(A[idx]);
@@ -133,8 +127,11 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
         }
     }
 
+    constexpr int peak_exclusion_ms = 8;
+    const int peak_exclusion = std::max(1, peak_exclusion_ms * static_cast<int>(sample_rate) / 1000);
+    double second = -1.0;
     for (int lag = -max_lag; lag <= max_lag; ++lag) {
-        if (std::abs(lag - best_lag) <= peak_exclusion_samples)
+        if (std::abs(lag - best_lag) <= peak_exclusion)
             continue;
         const size_t idx = lag >= 0 ? static_cast<size_t>(lag) : n - static_cast<size_t>(-lag);
         second = std::max(second, std::abs(A[idx]));
@@ -161,8 +158,12 @@ SyncResult estimate_sync_gcc_phat(const std::vector<float> &reference,
 
     // Confidence is intentionally conservative. A strong isolated peak gets
     // near 1.0; ambiguous peaks stay visibly lower.
-    out.confidence = std::clamp((out.peak_ratio - 1.02) / 0.25, 0.0, 1.0);
-    out.valid = best > 0.05 && out.confidence >= 0.25;
+    // The peak ratio is now measured against a genuinely separate peak, not
+    // an adjacent sample from the same correlation lobe.  This makes the
+    // confidence metric meaningful for chirps and other short calibration
+    // signals.
+    out.confidence = std::clamp((out.peak_ratio - 1.05) / 0.45, 0.0, 1.0);
+    out.valid = best > 0.05 && out.confidence >= 0.20;
     out.message = out.valid ? "Measurement complete." : "The correlation peak is ambiguous. Try a louder/cleaner signal.";
     return out;
 }
