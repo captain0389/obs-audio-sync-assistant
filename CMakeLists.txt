@@ -15,7 +15,6 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
     src/sync-engine.cpp
     src/sync-dock.cpp
     src/audio-capture.cpp
-    src/calibration-source.cpp
 )
 
 find_package(libobs REQUIRED)
