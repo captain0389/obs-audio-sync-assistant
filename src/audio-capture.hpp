@@ -1,10 +1,10 @@
 #pragma once
 
 #include <obs.h>
+
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <string>
 #include <vector>
 
 class AudioCaptureBuffer {
@@ -23,17 +23,22 @@ private:
     size_t max_samples_ = 48000 * 12;
 };
 
-class SourceAudioTap {
+// Captures one OBS post-mix audio track. Unlike a source audio callback,
+// this receives audio after OBS has applied the source's sync offset and
+// routed the source into the selected mixer track.
+class RawMixAudioTap {
 public:
-    SourceAudioTap() = default;
-    ~SourceAudioTap();
+    RawMixAudioTap() = default;
+    ~RawMixAudioTap();
 
-    bool attach(obs_source_t *source, AudioCaptureBuffer *buffer);
+    bool attach(size_t mix_idx, AudioCaptureBuffer *buffer, uint32_t sample_rate = 48000);
     void detach();
-    obs_source_t *source() const { return source_; }
+    size_t mix_idx() const { return mix_idx_; }
 
 private:
-    static void on_audio(void *param, obs_source_t *source, const struct audio_data *data, bool muted);
-    obs_source_t *source_ = nullptr;
+    static void on_audio(void *param, size_t mix_idx, struct audio_data *data);
+
+    size_t mix_idx_ = 0;
     AudioCaptureBuffer *buffer_ = nullptr;
+    bool attached_ = false;
 };

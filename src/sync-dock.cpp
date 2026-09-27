@@ -10,6 +10,24 @@
 #include <algorithm>
 #include <chrono>
 
+namespace {
+constexpr size_t kMaxAudioMixes = 6;
+
+size_t bit_index(uint32_t bit)
+{
+    size_t index = 0;
+    while (bit > 1) {
+        bit >>= 1;
+        ++index;
+    }
+    return index;
+}
+
+struct MixerScan {
+    uint32_t used = 0;
+};
+} // namespace
+
 SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
 {
     setWindowTitle("Audio Sync Assistant");
@@ -90,10 +108,23 @@ bool SyncDock::enum_source(void *param, obs_source_t *source)
         return true;
 
     const char *name = obs_source_get_name(source);
-    if (name) {
-        dock->reference_combo_->addItem(QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source)));
-        dock->target_combo_->addItem(QString::fromUtf8(name), QString::fromUtf8(obs_source_get_uuid(source)));
+    const char *uuid = obs_source_get_uuid(source);
+    if (name && uuid) {
+        dock->reference_combo_->addItem(QString::fromUtf8(name), QString::fromUtf8(uuid));
+        dock->target_combo_->addItem(QString::fromUtf8(name), QString::fromUtf8(uuid));
     }
+    return true;
+}
+
+bool SyncDock::enum_used_mixers(void *param, obs_source_t *source)
+{
+    auto *scan = static_cast<MixerScan *>(param);
+    if (!scan || !source)
+        return true;
+
+    const uint32_t flags = obs_source_get_output_flags(source);
+    if (flags & OBS_SOURCE_AUDIO)
+        scan->used |= obs_source_get_audio_mixers(source);
     return true;
 }
 
@@ -106,12 +137,83 @@ void SyncDock::refresh_sources()
         target_combo_->setCurrentIndex(1);
 }
 
+bool SyncDock::setup_probe_routing(obs_source_t *reference, obs_source_t *target)
+{
+    MixerScan scan;
+    obs_enum_sources(enum_used_mixers, &scan);
+
+    uint32_t free_bits[kMaxAudioMixes] = {};
+    size_t free_count = 0;
+    for (size_t i = 0; i < kMaxAudioMixes; ++i) {
+        const uint32_t bit = 1u << static_cast<uint32_t>(i);
+        if (!(scan.used & bit))
+            free_bits[free_count++] = bit;
+    }
+
+    if (free_count < 2) {
+        set_status("Need two unused OBS audio tracks for measurement. Free two mixer tracks and try again.");
+        return false;
+    }
+
+    obs_audio_info audio_info{};
+    if (obs_get_audio_info(&audio_info) && audio_info.samples_per_sec > 0)
+        sample_rate_ = audio_info.samples_per_sec;
+    else
+        sample_rate_ = 48000;
+
+    reference_source_ = obs_source_get_ref(reference);
+    target_source_ = obs_source_get_ref(target);
+    if (!reference_source_ || !target_source_) {
+        restore_probe_routing();
+        set_status("Could not retain the selected sources for measurement.");
+        return false;
+    }
+
+    reference_original_mixers_ = obs_source_get_audio_mixers(reference_source_);
+    target_original_mixers_ = obs_source_get_audio_mixers(target_source_);
+    reference_probe_bit_ = free_bits[0];
+    target_probe_bit_ = free_bits[1];
+
+    // Keep the user's existing track routing intact and add each source to a
+    // temporarily unused track. Because the probe tracks were unused by every
+    // audio source, each raw-mix callback contains only its selected source.
+    obs_source_set_audio_mixers(reference_source_, reference_original_mixers_ | reference_probe_bit_);
+    obs_source_set_audio_mixers(target_source_, target_original_mixers_ | target_probe_bit_);
+    probe_routing_active_ = true;
+    return true;
+}
+
+void SyncDock::restore_probe_routing()
+{
+    reference_tap_.detach();
+    target_tap_.detach();
+
+    if (probe_routing_active_) {
+        if (reference_source_)
+            obs_source_set_audio_mixers(reference_source_, reference_original_mixers_);
+        if (target_source_)
+            obs_source_set_audio_mixers(target_source_, target_original_mixers_);
+    }
+
+    if (reference_source_) {
+        obs_source_release(reference_source_);
+        reference_source_ = nullptr;
+    }
+    if (target_source_) {
+        obs_source_release(target_source_);
+        target_source_ = nullptr;
+    }
+
+    reference_probe_bit_ = 0;
+    target_probe_bit_ = 0;
+    probe_routing_active_ = false;
+}
+
 void SyncDock::stop_capture()
 {
     reference_buffer_.stop();
     target_buffer_.stop();
-    reference_tap_.detach();
-    target_tap_.detach();
+    restore_probe_routing();
 }
 
 void SyncDock::start_measurement()
@@ -133,14 +235,16 @@ void SyncDock::start_measurement()
     apply_button_->setEnabled(false);
     measure_button_->setEnabled(false);
     progress_->setValue(0);
-    set_status("Listening for shared audio…");
+    set_status("Preparing isolated post-sync audio tracks…");
     confidence_label_->clear();
 
     obs_source_t *ref = obs_get_source_by_uuid(reference_combo_->currentData().toString().toUtf8().constData());
     obs_source_t *target = obs_get_source_by_uuid(target_combo_->currentData().toString().toUtf8().constData());
     if (!ref || !target) {
-        if (ref) obs_source_release(ref);
-        if (target) obs_source_release(target);
+        if (ref)
+            obs_source_release(ref);
+        if (target)
+            obs_source_release(target);
         measure_button_->setEnabled(true);
         set_status("Could not access one of the selected sources.");
         return;
@@ -149,13 +253,35 @@ void SyncDock::start_measurement()
     target_name_ = target_combo_->currentText();
     reference_buffer_.start();
     target_buffer_.start();
-    reference_tap_.attach(ref, &reference_buffer_);
-    target_tap_.attach(target, &target_buffer_);
+
+    if (!setup_probe_routing(ref, target)) {
+        reference_buffer_.stop();
+        target_buffer_.stop();
+        obs_source_release(ref);
+        obs_source_release(target);
+        measure_button_->setEnabled(true);
+        return;
+    }
+
+    const bool ref_attached = reference_tap_.attach(
+        bit_index(reference_probe_bit_), &reference_buffer_, sample_rate_);
+    const bool target_attached = target_tap_.attach(
+        bit_index(target_probe_bit_), &target_buffer_, sample_rate_);
+
     obs_source_release(ref);
     obs_source_release(target);
 
+    if (!ref_attached || !target_attached) {
+        stop_capture();
+        measure_button_->setEnabled(true);
+        set_status("Could not attach to the temporary OBS measurement tracks.");
+        return;
+    }
+
+    set_status("Listening to post-sync audio…");
     const int seconds = duration_combo_->currentData().toInt();
-    worker_ = std::thread([this, seconds] {
+    const uint32_t sample_rate = sample_rate_;
+    worker_ = std::thread([this, seconds, sample_rate] {
         const int total_ms = seconds * 1000;
         for (int elapsed = 0; elapsed < total_ms && !cancel_.load(); elapsed += 50) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -165,11 +291,15 @@ void SyncDock::start_measurement()
 
         reference_buffer_.stop();
         target_buffer_.stop();
-        const auto ref = reference_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
-        const auto target = target_buffer_.snapshot(static_cast<size_t>(seconds) * 48000);
-        const SyncResult result = estimate_sync_gcc_phat(ref, target, 48000, 500);
+        const auto ref = reference_buffer_.snapshot(static_cast<size_t>(seconds) * sample_rate);
+        const auto target = target_buffer_.snapshot(static_cast<size_t>(seconds) * sample_rate);
+        const SyncResult result = estimate_sync_gcc_phat(ref, target, sample_rate, 500);
 
+        // OBS state changes must happen on the frontend thread. Queue cleanup
+        // and result presentation together so the temporary tracks are removed
+        // before the user can start another measurement.
         QMetaObject::invokeMethod(this, [this, result] {
+            stop_capture();
             last_result_ = result;
             measure_button_->setEnabled(true);
             progress_->setValue(100);
