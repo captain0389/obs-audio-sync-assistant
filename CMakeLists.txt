@@ -1,53 +1,75 @@
-cmake_minimum_required(VERSION 3.28)
-project(obs-audio-sync-assistant VERSION 0.3.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.28...3.30)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
 
-option(ENABLE_QT "Build the OBS Qt dock UI" ON)
+project(${_name} VERSION ${_version})
 
-find_package(libobs REQUIRED)
-find_package(obs-frontend-api REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
+option(ENABLE_QT "Use Qt functionality" ON)
 
-add_library(obs-audio-sync-assistant MODULE
+include(compilerconfig)
+include(defaults)
+include(helpers)
+
+add_library(${CMAKE_PROJECT_NAME} MODULE)
+
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     src/plugin-main.cpp
     src/sync-engine.cpp
     src/sync-dock.cpp
     src/audio-capture.cpp
 )
 
-target_link_libraries(obs-audio-sync-assistant PRIVATE
-    OBS::libobs
-    OBS::obs-frontend-api
-    Qt6::Core
-    Qt6::Widgets
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    src
 )
 
-target_include_directories(obs-audio-sync-assistant PRIVATE src)
-
-target_compile_definitions(obs-audio-sync-assistant PRIVATE
-    OBS_AUDIO_SYNC_ASSISTANT_VERSION="${PROJECT_VERSION}"
-)
-
-if(MSVC)
-    target_compile_options(obs-audio-sync-assistant PRIVATE /W4 /permissive-)
+if(ENABLE_FRONTEND_API)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        ENABLE_FRONTEND_API
+    )
 endif()
 
-set_target_properties(obs-audio-sync-assistant PROPERTIES
-    OUTPUT_NAME "obs-audio-sync-assistant"
-    PREFIX ""
-    AUTOMOC ON
-    AUTOUIC ON
-    AUTORCC ON
+if(ENABLE_QT)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+        Qt6::Widgets
+    )
+
+    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+        AUTOMOC ON
+        AUTOUIC ON
+        AUTORCC ON
+    )
+endif()
+
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+    OBS::libobs
 )
 
-install(TARGETS obs-audio-sync-assistant
-    RUNTIME DESTINATION obs-plugins/64bit
-    LIBRARY DESTINATION obs-plugins
+if(ENABLE_FRONTEND_API)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
+        OBS::obs-frontend-api
+    )
+endif()
+
+setup_plugin_target(${CMAKE_PROJECT_NAME})
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/obs-audio-sync-assistant-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/obs-audio-sync-assistant-config.cmake"
+    INSTALL_DESTINATION "lib/cmake/obs-audio-sync-assistant"
 )
 
-install(DIRECTORY data/
+install(
+    FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/obs-audio-sync-assistant-config.cmake"
+    DESTINATION
+        "lib/cmake/obs-audio-sync-assistant"
+)
+
+install(
+    DIRECTORY data/
     DESTINATION data/obs-plugins/obs-audio-sync-assistant
 )
