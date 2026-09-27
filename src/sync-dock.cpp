@@ -441,6 +441,11 @@ void SyncDock::start_calibration()
     // obs_source_set_monitoring_enabled API does not exist.
     obs_source_set_monitoring_type(
         calibration_source_, OBS_MONITORING_TYPE_MONITOR_ONLY);
+    // A private source is not guaranteed to be considered audio-active just
+    // because it has a scene item. Explicitly activate its audio path so the
+    // generated samples reach OBS' monitor mixer.
+    obs_source_set_audio_active(calibration_source_, true);
+    obs_source_set_enabled(calibration_source_, true);
     obs_source_set_volume(calibration_source_, 0.5f);
 
     calibration_mic_name_ = calibration_mic_combo_->currentText();

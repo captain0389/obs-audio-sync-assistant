@@ -1,6 +1,7 @@
 #include "calibration-source.hpp"
 
 #include <obs.h>
+#include <util/platform.h>
 
 #include <algorithm>
 #include <atomic>
@@ -126,6 +127,10 @@ void thread_main(CalibrationData *data)
                 playing = true;
                 signal_pos = 0;
                 lead_remaining = LEAD_SILENCE_FRAMES;
+                // Use OBS' monotonic clock for audio timestamps. Starting at
+                // timestamp 0 can make OBS treat the generated samples as
+                // stale and prevent them from reaching the monitor path.
+                timestamp = os_gettime_ns();
             }
         }
 
@@ -156,9 +161,8 @@ void thread_main(CalibrationData *data)
             static_cast<uint64_t>(BLOCK_FRAMES) * 1000000000ULL /
             SAMPLE_RATE;
 
-        // Keep output on a real-time 10 ms cadence.  The OBS test sine source
-        // follows the same model; timestamps alone should not be used to
-        // flood the audio pipeline with future samples.
+        // Keep output on a real-time 10 ms cadence. Timestamps advance on the
+        // same OBS monotonic clock so the audio pipeline can place samples.
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
