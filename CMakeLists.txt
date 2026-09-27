@@ -23,11 +23,7 @@ endif()
 if(ENABLE_QT)
     find_package(Qt6 COMPONENTS Widgets Core REQUIRED)
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
-    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
-        AUTOMOC ON
-        AUTOUIC ON
-        AUTORCC ON
-    )
+    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON)
 endif()
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
@@ -43,7 +39,4 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     OBS_AUDIO_SYNC_ASSISTANT_VERSION="${_version}"
 )
 
-set_target_properties_plugin(${CMAKE_PROJECT_NAME}
-    PROPERTIES
-    OUTPUT_NAME ${_name}
-)
+set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
