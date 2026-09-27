@@ -206,14 +206,7 @@ void destroy(void *opaque)
     delete data;
 }
 
-struct obs_source_info source_info = {
-    .id = calibration_source::SOURCE_ID,
-    .type = OBS_SOURCE_TYPE_INPUT,
-    .output_flags = OBS_SOURCE_AUDIO,
-    .get_name = get_name,
-    .create = create,
-    .destroy = destroy,
-};
+obs_source_info source_info = {};
 
 } // namespace
 
@@ -221,6 +214,15 @@ namespace calibration_source {
 
 void register_source()
 {
+    // OBS Audio Sync Assistant is built with C++17 by the official OBS
+    // plugin template, so avoid C++20 designated initializers here.
+    source_info.id = SOURCE_ID;
+    source_info.type = OBS_SOURCE_TYPE_INPUT;
+    source_info.output_flags = OBS_SOURCE_AUDIO;
+    source_info.get_name = get_name;
+    source_info.create = create;
+    source_info.destroy = destroy;
+
     obs_register_source(&source_info);
 }
 
