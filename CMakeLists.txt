@@ -1,47 +1,53 @@
-cmake_minimum_required(VERSION 3.28...3.30)
+cmake_minimum_required(VERSION 3.28)
+project(obs-audio-sync-assistant VERSION 0.3.0 LANGUAGES C CXX)
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
-project(${_name} VERSION ${_version})
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
-option(ENABLE_QT "Use Qt functionality" ON)
-
-include(compilerconfig)
-include(defaults)
-include(helpers)
-
-add_library(${CMAKE_PROJECT_NAME} MODULE
-    src/plugin-main.cpp
-    src/sync-engine.cpp
-    src/sync-dock.cpp
-    src/audio-capture.cpp
-)
+option(ENABLE_QT "Build the OBS Qt dock UI" ON)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
+find_package(obs-frontend-api REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 
-if(ENABLE_FRONTEND_API)
-    find_package(obs-frontend-api REQUIRED)
-    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
-endif()
-
-if(ENABLE_QT)
-    find_package(Qt6 COMPONENTS Widgets Core REQUIRED)
-    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
-    set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON)
-endif()
-
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+add_library(obs-audio-sync-assistant MODULE
     src/plugin-main.cpp
     src/sync-engine.cpp
     src/sync-dock.cpp
     src/audio-capture.cpp
 )
 
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
-
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    OBS_AUDIO_SYNC_ASSISTANT_VERSION="${_version}"
+target_link_libraries(obs-audio-sync-assistant PRIVATE
+    OBS::libobs
+    OBS::obs-frontend-api
+    Qt6::Core
+    Qt6::Widgets
 )
 
-set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+target_include_directories(obs-audio-sync-assistant PRIVATE src)
+
+target_compile_definitions(obs-audio-sync-assistant PRIVATE
+    OBS_AUDIO_SYNC_ASSISTANT_VERSION="${PROJECT_VERSION}"
+)
+
+if(MSVC)
+    target_compile_options(obs-audio-sync-assistant PRIVATE /W4 /permissive-)
+endif()
+
+set_target_properties(obs-audio-sync-assistant PROPERTIES
+    OUTPUT_NAME "obs-audio-sync-assistant"
+    PREFIX ""
+    AUTOMOC ON
+    AUTOUIC ON
+    AUTORCC ON
+)
+
+install(TARGETS obs-audio-sync-assistant
+    RUNTIME DESTINATION obs-plugins/64bit
+    LIBRARY DESTINATION obs-plugins
+)
+
+install(DIRECTORY data/
+    DESTINATION data/obs-plugins/obs-audio-sync-assistant
+)

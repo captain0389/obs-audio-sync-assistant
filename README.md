@@ -1,59 +1,59 @@
-# OBS Plugin Template
+# OBS Audio Sync Assistant — prototype
 
-## Introduction
+A Windows-first OBS Studio plugin prototype that measures the relative timing of two OBS audio sources using GCC-PHAT cross-correlation and can apply the measured correction to the target source.
 
-The plugin template is meant to be used as a starting point for OBS Studio plugin development. It includes:
+## What the prototype does
 
-* Boilerplate plugin source code
-* A CMake project file
-* GitHub Actions workflows and repository actions
+1. Adds an **Audio Sync Assistant** dock to OBS.
+2. Enumerates audio-capable OBS sources.
+3. Lets the user select a **Reference** and **Target** source.
+4. Captures 3/5/8 seconds of source audio through OBS's source audio-capture callbacks.
+5. Converts each source to mono and runs GCC-PHAT correlation.
+6. Reports the measured offset and a conservative confidence score.
+7. Applies the signed correction to the target using `obs_source_set_sync_offset()`.
 
-## Supported Build Environments
+### Offset convention
 
-| Platform  | Tool   |
-|-----------|--------|
-| Windows   | Visual Studio 17 2022 |
-| macOS     | XCode 16.0 |
-| Windows, macOS  | CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3 |
-| Ubuntu 24.04 | `ninja-build` |
-| Ubuntu 24.04 | `pkg-config`
-| Ubuntu 24.04 | `build-essential` |
+A positive measured offset means **the target leads the reference**, so the plugin adds a positive delay to the target. A negative offset means the target lags the reference and the plugin applies a negative correction.
 
-## Quick Start
+## Important prototype limitations
 
-An absolute bare-bones [Quick Start Guide](https://github.com/obsproject/obs-plugintemplate/wiki/Quick-Start-Guide) is available in the wiki.
+- This first version assumes OBS's normal 48 kHz audio rate.
+- It captures only while the selected sources are producing audio.
+- It uses a simple in-memory capture window; it does not yet compensate for clock drift.
+- It does not yet synchronize video.
+- It does not yet provide a calibration tone.
+- Confidence is intentionally conservative and should not be treated as a statistical probability.
+- The project has not been compiled in this environment because the OBS/Qt Windows development SDK is not installed here.
 
-## Documentation
+## Build prerequisites on Windows
 
-All documentation can be found in the [Plugin Template Wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
+- Windows 10/11 x64
+- Visual Studio 2022 or newer with C++ desktop workload
+- CMake 3.28+
+- Qt 6 development libraries compatible with your OBS build
+- OBS Studio development libraries / CMake package
 
-Suggested reading to get up and running:
+The official OBS plugin template supports Windows with Visual Studio and CMake and is the recommended starting point for production packaging.
 
-* [Getting started](https://github.com/obsproject/obs-plugintemplate/wiki/Getting-Started)
-* [Build system requirements](https://github.com/obsproject/obs-plugintemplate/wiki/Build-System-Requirements)
-* [Build system options](https://github.com/obsproject/obs-plugintemplate/wiki/CMake-Build-System-Options)
+## Suggested next development steps
 
-## GitHub Actions & CI
+1. Build against the user's exact OBS version.
+2. Verify callback sample format and source activation behavior on Windows.
+3. Add a continuously updated waveform/correlation display.
+4. Add selectable analysis band-pass/high-pass filtering to reject voice/noise.
+5. Add drift measurement over longer recordings.
+6. Add **Calibration Mode** that emits a known click sequence.
+7. Add video/audio synchronization using OBS raw video timestamps.
+8. Add undo/restore of the previous source sync offset.
+9. Add installer/package generation.
 
-Default GitHub Actions workflows are available for the following repository actions:
 
-* `push`: Run for commits or tags pushed to `master` or `main` branches.
-* `pr-pull`: Run when a Pull Request has been pushed or synchronized.
-* `dispatch`: Run when triggered by the workflow dispatch in GitHub's user interface.
-* `build-project`: Builds the actual project and is triggered by other workflows.
-* `check-format`: Checks CMake and plugin source code formatting and is triggered by other workflows.
+## v0.3.0 calibration mode
 
-The workflows make use of GitHub repository actions (contained in `.github/actions`) and build scripts (contained in `.github/scripts`) which are not needed for local development, but might need to be adjusted if additional/different steps are required to build the plugin.
+Adds a temporary known chirp calibration source and speaker-to-microphone calibration workflow. See README.txt in the patch for details.
 
-### Retrieving build artifacts
 
-Successful builds on GitHub Actions will produce build artifacts that can be downloaded for testing. These artifacts are commonly simple archives and will not contain package installers or installation programs.
+## v0.3.0
 
-### Building a Release
-
-To create a release, an appropriately named tag needs to be pushed to the `main`/`master` branch using semantic versioning (e.g., `12.3.4`, `23.4.5-beta2`). A draft release will be created on the associated repository with generated installer packages or installation programs attached as release artifacts.
-
-## Signing and Notarizing on macOS
-
-Basic concepts of codesigning and notarization on macOS are explained in the correspodning [Wiki article](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS) which has a specific section for the [GitHub Actions setup](https://github.com/obsproject/obs-plugintemplate/wiki/Codesigning-On-macOS#setting-up-code-signing-for-github-actions).
+Waveform Alignment mode replaces the experimental microphone/speaker calibration feature. The plugin records two OBS audio sources simultaneously, displays their waveforms, provides an automatic initial alignment estimate, and lets the user fine-tune the correction with a millisecond slider before applying it to the target source. The dock is scrollable so the UI no longer forces OBS to stretch.
