@@ -534,6 +534,8 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
             &SyncDock::vertical_zoom_slider_changed);
     connect(fit_button_, &QPushButton::clicked, this,
             &SyncDock::fit_waveform);
+    connect(overlay_checkbox_, &QCheckBox::toggled, this,
+            &SyncDock::overlay_toggled);
 
     refresh_sources();
 }
