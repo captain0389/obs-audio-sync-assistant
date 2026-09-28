@@ -31,6 +31,9 @@ constexpr int SLIDER_MAX_MS = 500;
 constexpr int ZOOM_SLIDER_MAX = 100;
 constexpr double MIN_ZOOM = 1.0;
 constexpr double MAX_ZOOM = 1000.0;
+constexpr int VERTICAL_ZOOM_SLIDER_MAX = 100;
+constexpr double MIN_VERTICAL_ZOOM = 1.0;
+constexpr double MAX_VERTICAL_ZOOM = 20.0;
 
 } // namespace
 
@@ -86,6 +89,7 @@ void WaveformWidget::set_waveforms(const std::vector<float> &reference,
     sample_rate_ = sample_rate > 0 ? sample_rate : 48000;
     alignment_ms_ = alignment_ms;
     zoom_factor_ = 1.0;
+    vertical_zoom_factor_ = 1.0;
     center_ms_ = 0.0;
     update();
 }
@@ -111,9 +115,16 @@ void WaveformWidget::set_zoom(double zoom_factor)
     update();
 }
 
+void WaveformWidget::set_vertical_zoom(double zoom_factor)
+{
+    vertical_zoom_factor_ = std::clamp(zoom_factor, MIN_VERTICAL_ZOOM, MAX_VERTICAL_ZOOM);
+    update();
+}
+
 void WaveformWidget::fit_to_recording()
 {
     zoom_factor_ = 1.0;
+    vertical_zoom_factor_ = 1.0;
     center_ms_ = 0.0;
     update();
 }
@@ -121,6 +132,12 @@ void WaveformWidget::fit_to_recording()
 void WaveformWidget::set_center_ms(double center_ms)
 {
     center_ms_ = clamp_center(center_ms);
+    update();
+}
+
+void WaveformWidget::set_overlay(bool enabled)
+{
+    overlay_ = enabled;
     update();
 }
 
@@ -152,6 +169,16 @@ void WaveformWidget::draw_waveform(QPainter &painter,
     QPainterPath path;
     path.reserve(width * 2);
 
+    // Keep each waveform inside its own lane while allowing substantial
+    // vertical magnification. This makes quiet details easier to inspect
+    // without letting the reference and target traces overlap.
+    painter.save();
+    painter.setClipRect(QRectF(0.0,
+                               static_cast<double>(y_center) - height / 2.0,
+                               static_cast<double>(width),
+                               static_cast<double>(height)),
+                        Qt::IntersectClip);
+
     for (int x = 0; x < width; ++x) {
         const double t0 = view_start_ms +
             (static_cast<double>(x) / static_cast<double>(width)) * view_duration;
@@ -175,14 +202,16 @@ void WaveformWidget::draw_waveform(QPainter &painter,
             max_v = std::max(max_v, samples[static_cast<size_t>(i)]);
         }
 
-        const double y1 = y_center - static_cast<double>(max_v) * height * 0.45;
-        const double y2 = y_center - static_cast<double>(min_v) * height * 0.45;
+        const double amplitude = static_cast<double>(height) * 0.45 * vertical_zoom_factor_;
+        const double y1 = y_center - static_cast<double>(max_v) * amplitude;
+        const double y2 = y_center - static_cast<double>(min_v) * amplitude;
         const double xd = static_cast<double>(x);
         path.moveTo(xd, y1);
         path.lineTo(xd, y2);
     }
 
     painter.drawPath(path);
+    painter.restore();
 }
 
 void WaveformWidget::paintEvent(QPaintEvent *)
@@ -197,10 +226,15 @@ void WaveformWidget::paintEvent(QPaintEvent *)
     const int half = std::max(40, (bottom - top) / 2);
     const int ref_center = top + half / 2;
     const int target_center = top + half + half / 2;
+    const int overlay_center = top + (bottom - top) / 2;
 
     painter.setPen(palette().mid().color());
-    painter.drawLine(0, ref_center, w, ref_center);
-    painter.drawLine(0, target_center, w, target_center);
+    if (overlay_) {
+        painter.drawLine(0, overlay_center, w, overlay_center);
+    } else {
+        painter.drawLine(0, ref_center, w, ref_center);
+        painter.drawLine(0, target_center, w, target_center);
+    }
 
     if (reference_.empty() || target_.empty()) {
         painter.setPen(palette().text().color());
@@ -243,26 +277,42 @@ void WaveformWidget::paintEvent(QPaintEvent *)
     if (center_x >= 0.0 && center_x <= w)
         painter.drawLine(QPointF(center_x, top), QPointF(center_x, bottom));
 
-    painter.setPen(palette().text().color());
-    painter.drawText(8, 18, "Reference");
-    painter.drawText(8, top + half + 18, "Target");
+    if (overlay_) {
+        painter.setPen(palette().text().color());
+        painter.drawText(8, 18, "Reference + Target (overlaid)");
 
-    painter.setPen(QPen(palette().text().color(), 1));
-    draw_waveform(painter, reference_, ref_center, half,
-                  0.0, view_start, view_end, sample_rate_, w);
+        const int overlay_height = std::max(40, bottom - top);
+        painter.setPen(QPen(palette().text().color(), 1));
+        draw_waveform(painter, reference_, overlay_center, overlay_height,
+                      0.0, view_start, view_end, sample_rate_, w);
 
-    painter.setPen(QPen(palette().highlight().color(), 1));
-    draw_waveform(painter, target_, target_center, half,
-                  alignment_ms_, view_start, view_end, sample_rate_, w);
+        painter.setPen(QPen(palette().highlight().color(), 1));
+        draw_waveform(painter, target_, overlay_center, overlay_height,
+                      alignment_ms_, view_start, view_end, sample_rate_, w);
+    } else {
+        painter.setPen(palette().text().color());
+        painter.drawText(8, 18, "Reference");
+        painter.drawText(8, top + half + 18, "Target");
+
+        painter.setPen(QPen(palette().text().color(), 1));
+        draw_waveform(painter, reference_, ref_center, half,
+                      0.0, view_start, view_end, sample_rate_, w);
+
+        painter.setPen(QPen(palette().highlight().color(), 1));
+        draw_waveform(painter, target_, target_center, half,
+                      alignment_ms_, view_start, view_end, sample_rate_, w);
+    }
 
     painter.setPen(QPen(palette().highlight().color(), 2));
     if (center_x >= 0.0 && center_x <= w)
         painter.drawLine(QPointF(center_x, top), QPointF(center_x, bottom));
 
     painter.setPen(palette().text().color());
-    const QString zoom_text = QString("%1x  •  %2 ms visible  •  Wheel: zoom  •  Drag: pan")
+    const QString zoom_text = QString("%1x time  •  %2x amplitude  •  %3 ms visible  •  %4  •  Wheel: time zoom  •  Shift+Wheel: amplitude zoom  •  Drag: pan")
         .arg(zoom_factor_, 0, 'f', zoom_factor_ < 10.0 ? 1 : 0)
-        .arg(visible, 0, 'f', visible < 1.0 ? 3 : 1);
+        .arg(vertical_zoom_factor_, 0, 'f', vertical_zoom_factor_ < 10.0 ? 1 : 0)
+        .arg(visible, 0, 'f', visible < 1.0 ? 3 : 1)
+        .arg(overlay_ ? "Overlay: ON" : "Overlay: OFF");
     painter.drawText(8, height() - 7, zoom_text);
 }
 
@@ -273,10 +323,19 @@ void WaveformWidget::wheelEvent(QWheelEvent *event)
         return;
     }
 
+    const double wheel_factor = event->angleDelta().y() > 0 ? 1.35 : 1.0 / 1.35;
+
+    // Shift+wheel controls vertical amplitude zoom. Normal wheel behavior
+    // remains horizontal/time zoom so existing workflows are unchanged.
+    if (event->modifiers() & Qt::ShiftModifier) {
+        set_vertical_zoom(vertical_zoom_factor_ * wheel_factor);
+        event->accept();
+        return;
+    }
+
     const QPointF pos = event->position();
     const double anchor_time = time_at_x(pos.x());
-    const double factor = event->angleDelta().y() > 0 ? 1.35 : 1.0 / 1.35;
-    const double new_zoom = std::clamp(zoom_factor_ * factor, MIN_ZOOM, MAX_ZOOM);
+    const double new_zoom = std::clamp(zoom_factor_ * wheel_factor, MIN_ZOOM, MAX_ZOOM);
 
     if (std::abs(new_zoom - zoom_factor_) < 1e-9) {
         event->accept();
@@ -420,10 +479,33 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
     zoom_row->addWidget(fit_button_);
     wave_layout->addLayout(zoom_row);
 
+    auto *vertical_zoom_row = new QHBoxLayout();
+    vertical_zoom_row->addWidget(new QLabel("Vertical waveform zoom:"));
+    vertical_zoom_slider_ = new QSlider(Qt::Horizontal);
+    vertical_zoom_slider_->setRange(0, VERTICAL_ZOOM_SLIDER_MAX);
+    vertical_zoom_slider_->setValue(0);
+    vertical_zoom_slider_->setEnabled(false);
+    vertical_zoom_slider_->setToolTip("Magnify the waveform amplitude from 1x up to 20x.");
+    vertical_zoom_row->addWidget(vertical_zoom_slider_, 1);
+    vertical_zoom_label_ = new QLabel("1.0x");
+    vertical_zoom_label_->setMinimumWidth(90);
+    vertical_zoom_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    vertical_zoom_row->addWidget(vertical_zoom_label_);
+    wave_layout->addLayout(vertical_zoom_row);
+
+    auto *overlay_row = new QHBoxLayout();
+    overlay_checkbox_ = new QCheckBox("Overlay reference and target waveforms");
+    overlay_checkbox_->setEnabled(false);
+    overlay_checkbox_->setToolTip("Draw both waveforms in the same lane so matching features can be compared directly.");
+    overlay_row->addWidget(overlay_checkbox_);
+    overlay_row->addStretch();
+    wave_layout->addLayout(overlay_row);
+
     auto *hint = new QLabel(
         "Positive values delay the target. Use the mouse wheel over the waveform to zoom in/out, "
-        "and drag left/right to pan. At maximum zoom only a few milliseconds of audio are visible. "
-        "Line up matching waveform features, then apply the correction.");
+        "and drag left/right to pan. Shift+mouse-wheel or the vertical slider magnifies waveform amplitude up to 20x. "
+        "Turn on overlay mode to draw both sources in the same lane for direct visual comparison. "
+        "At maximum time zoom only a few milliseconds of audio are visible. Line up matching waveform features, then apply the correction.");
     hint->setWordWrap(true);
     wave_layout->addWidget(hint);
 
@@ -448,6 +530,8 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
             &SyncDock::alignment_slider_changed);
     connect(zoom_slider_, &QSlider::valueChanged, this,
             &SyncDock::zoom_slider_changed);
+    connect(vertical_zoom_slider_, &QSlider::valueChanged, this,
+            &SyncDock::vertical_zoom_slider_changed);
     connect(fit_button_, &QPushButton::clicked, this,
             &SyncDock::fit_waveform);
 
@@ -526,7 +610,9 @@ void SyncDock::start_measurement()
     apply_button_->setEnabled(false);
     alignment_slider_->setEnabled(false);
     zoom_slider_->setEnabled(false);
+    vertical_zoom_slider_->setEnabled(false);
     fit_button_->setEnabled(false);
+    overlay_checkbox_->setEnabled(false);
     measure_button_->setEnabled(false);
     has_recording_ = false;
     progress_->setValue(0);
@@ -605,7 +691,9 @@ void SyncDock::start_measurement()
                 if (!has_recording_) {
                     alignment_slider_->setEnabled(false);
                     zoom_slider_->setEnabled(false);
+                    vertical_zoom_slider_->setEnabled(false);
                     fit_button_->setEnabled(false);
+                    overlay_checkbox_->setEnabled(false);
                     apply_button_->setEnabled(false);
                     set_status("No usable audio was captured from one or both sources.");
                     confidence_label_->clear();
@@ -620,7 +708,9 @@ void SyncDock::start_measurement()
                 alignment_slider_->blockSignals(false);
                 alignment_slider_->setEnabled(true);
                 zoom_slider_->setEnabled(true);
+                vertical_zoom_slider_->setEnabled(true);
                 fit_button_->setEnabled(true);
+                overlay_checkbox_->setEnabled(true);
 
                 waveform_->set_waveforms(ref, target, 48000,
                                          configured_difference_ms_ + selected_alignment_ms_);
@@ -628,6 +718,11 @@ void SyncDock::start_measurement()
                 zoom_slider_->setValue(0);
                 zoom_slider_->blockSignals(false);
                 zoom_label_->setText("1.0x");
+                vertical_zoom_slider_->blockSignals(true);
+                vertical_zoom_slider_->setValue(0);
+                vertical_zoom_slider_->blockSignals(false);
+                vertical_zoom_label_->setText("1.0x");
+                waveform_->set_vertical_zoom(1.0);
                 update_alignment_display();
 
                 if (result.valid) {
@@ -688,6 +783,34 @@ QString SyncDock::zoom_text(double zoom)
     return QString("%1x").arg(zoom, 0, 'f', 0);
 }
 
+double SyncDock::vertical_zoom_from_slider(int value)
+{
+    const double normalized = std::clamp(value, 0, VERTICAL_ZOOM_SLIDER_MAX) /
+                              static_cast<double>(VERTICAL_ZOOM_SLIDER_MAX);
+    return std::pow(MAX_VERTICAL_ZOOM / MIN_VERTICAL_ZOOM, normalized) * MIN_VERTICAL_ZOOM;
+}
+
+int SyncDock::slider_from_vertical_zoom(double zoom)
+{
+    const double normalized = std::log(std::clamp(zoom, MIN_VERTICAL_ZOOM, MAX_VERTICAL_ZOOM) / MIN_VERTICAL_ZOOM) /
+                              std::log(MAX_VERTICAL_ZOOM / MIN_VERTICAL_ZOOM);
+    return static_cast<int>(std::lround(normalized * VERTICAL_ZOOM_SLIDER_MAX));
+}
+
+QString SyncDock::vertical_zoom_text(double zoom)
+{
+    if (zoom < 10.0)
+        return QString("%1x").arg(zoom, 0, 'f', 1);
+    return QString("%1x").arg(zoom, 0, 'f', 0);
+}
+
+void SyncDock::vertical_zoom_slider_changed(int value)
+{
+    const double zoom = vertical_zoom_from_slider(value);
+    waveform_->set_vertical_zoom(zoom);
+    vertical_zoom_label_->setText(vertical_zoom_text(zoom));
+}
+
 void SyncDock::zoom_slider_changed(int value)
 {
     const double zoom = zoom_from_slider(value);
@@ -702,6 +825,15 @@ void SyncDock::fit_waveform()
     zoom_slider_->setValue(slider_from_zoom(1.0));
     zoom_slider_->blockSignals(false);
     zoom_label_->setText("1.0x");
+    vertical_zoom_slider_->blockSignals(true);
+    vertical_zoom_slider_->setValue(slider_from_vertical_zoom(1.0));
+    vertical_zoom_slider_->blockSignals(false);
+    vertical_zoom_label_->setText("1.0x");
+}
+
+void SyncDock::overlay_toggled(bool checked)
+{
+    waveform_->set_overlay(checked);
 }
 
 void SyncDock::apply_result()

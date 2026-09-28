@@ -3,6 +3,7 @@
 #include "audio-capture.hpp"
 #include "sync-engine.hpp"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
 #include <QPushButton>
@@ -31,8 +32,12 @@ public:
 
     double zoom() const { return zoom_factor_; }
     void set_zoom(double zoom_factor);
+    double vertical_zoom() const { return vertical_zoom_factor_; }
+    void set_vertical_zoom(double zoom_factor);
     void fit_to_recording();
     void set_center_ms(double center_ms);
+    void set_overlay(bool enabled);
+    bool overlay() const { return overlay_; }
 
     QSize minimumSizeHint() const override { return QSize(500, 300); }
 
@@ -58,8 +63,10 @@ private:
     int sample_rate_ = 48000;
     double alignment_ms_ = 0.0;
     double zoom_factor_ = 1.0;
+    double vertical_zoom_factor_ = 1.0;
     double center_ms_ = 0.0;
     bool dragging_ = false;
+    bool overlay_ = false;
     QPoint last_mouse_pos_;
 };
 
@@ -75,7 +82,9 @@ private slots:
     void apply_result();
     void alignment_slider_changed(int value);
     void zoom_slider_changed(int value);
+    void vertical_zoom_slider_changed(int value);
     void fit_waveform();
+    void overlay_toggled(bool checked);
 
 private:
     void stop_capture();
@@ -85,6 +94,9 @@ private:
     static double zoom_from_slider(int value);
     static int slider_from_zoom(double zoom);
     static QString zoom_text(double zoom);
+    static double vertical_zoom_from_slider(int value);
+    static int slider_from_vertical_zoom(double zoom);
+    static QString vertical_zoom_text(double zoom);
 
     QComboBox *reference_combo_ = nullptr;
     QComboBox *target_combo_ = nullptr;
@@ -95,9 +107,12 @@ private:
     QLabel *confidence_label_ = nullptr;
     QLabel *alignment_label_ = nullptr;
     QLabel *zoom_label_ = nullptr;
+    QLabel *vertical_zoom_label_ = nullptr;
+    QCheckBox *overlay_checkbox_ = nullptr;
     QProgressBar *progress_ = nullptr;
     QSlider *alignment_slider_ = nullptr;
     QSlider *zoom_slider_ = nullptr;
+    QSlider *vertical_zoom_slider_ = nullptr;
     QPushButton *fit_button_ = nullptr;
     WaveformWidget *waveform_ = nullptr;
 
