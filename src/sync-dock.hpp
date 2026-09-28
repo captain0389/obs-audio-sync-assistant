@@ -85,6 +85,7 @@ private slots:
     void vertical_zoom_slider_changed(int value);
     void fit_waveform();
     void overlay_toggled(bool checked);
+    void remember_source_selection();
 
 private:
     void stop_capture();
@@ -129,4 +130,5 @@ private:
     double selected_alignment_ms_ = 0.0;
     double configured_difference_ms_ = 0.0;
     bool has_recording_ = false;
+    bool restoring_sources_ = false;
 };

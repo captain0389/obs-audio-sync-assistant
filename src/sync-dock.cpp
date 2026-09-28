@@ -12,6 +12,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QMetaObject>
+#include <QSettings>
 
 #include <algorithm>
 #include <chrono>
@@ -34,6 +35,13 @@ constexpr double MAX_ZOOM = 1000.0;
 constexpr int VERTICAL_ZOOM_SLIDER_MAX = 100;
 constexpr double MIN_VERTICAL_ZOOM = 1.0;
 constexpr double MAX_VERTICAL_ZOOM = 20.0;
+
+constexpr char SETTINGS_ORGANIZATION[] = "OBSProject";
+constexpr char SETTINGS_APPLICATION[] = "obs-audio-sync-assistant";
+constexpr char SETTINGS_REFERENCE_UUID[] = "sources/reference_uuid";
+constexpr char SETTINGS_REFERENCE_NAME[] = "sources/reference_name";
+constexpr char SETTINGS_TARGET_UUID[] = "sources/target_uuid";
+constexpr char SETTINGS_TARGET_NAME[] = "sources/target_name";
 
 } // namespace
 
@@ -536,6 +544,10 @@ SyncDock::SyncDock(QWidget *parent) : QWidget(parent)
             &SyncDock::fit_waveform);
     connect(overlay_checkbox_, &QCheckBox::toggled, this,
             &SyncDock::overlay_toggled);
+    connect(reference_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &SyncDock::remember_source_selection);
+    connect(target_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &SyncDock::remember_source_selection);
 
     refresh_sources();
 }
@@ -576,12 +588,69 @@ bool SyncDock::enum_source(void *param, obs_source_t *source)
 
 void SyncDock::refresh_sources()
 {
+    QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
+    const QString saved_ref_uuid = settings.value(SETTINGS_REFERENCE_UUID).toString();
+    const QString saved_ref_name = settings.value(SETTINGS_REFERENCE_NAME).toString();
+    const QString saved_target_uuid = settings.value(SETTINGS_TARGET_UUID).toString();
+    const QString saved_target_name = settings.value(SETTINGS_TARGET_NAME).toString();
+
+    restoring_sources_ = true;
     reference_combo_->clear();
     target_combo_->clear();
     obs_enum_sources(enum_source, this);
 
-    if (target_combo_->count() > 1)
+    auto select_saved = [](QComboBox *combo, const QString &saved_uuid,
+                           const QString &saved_name) {
+        if (combo->count() == 0)
+            return false;
+
+        int index = -1;
+        if (!saved_uuid.isEmpty())
+            index = combo->findData(saved_uuid);
+        if (index < 0 && !saved_name.isEmpty())
+            index = combo->findText(saved_name, Qt::MatchExactly);
+        if (index >= 0) {
+            combo->setCurrentIndex(index);
+            return true;
+        }
+        return false;
+    };
+
+    const bool ref_restored = select_saved(reference_combo_, saved_ref_uuid, saved_ref_name);
+    const bool target_restored = select_saved(target_combo_, saved_target_uuid, saved_target_name);
+
+    // Preserve the existing convenience of choosing the second source as the
+    // default when no previous target selection can be restored.
+    if (!target_restored && target_combo_->count() > 1)
         target_combo_->setCurrentIndex(1);
+
+    // If there is only one source, don't force both controls onto the same
+    // source; the measurement validation will require two distinct sources.
+    if (!ref_restored && reference_combo_->count() > 0)
+        reference_combo_->setCurrentIndex(0);
+
+    restoring_sources_ = false;
+    remember_source_selection();
+}
+
+void SyncDock::remember_source_selection()
+{
+    if (restoring_sources_)
+        return;
+
+    QSettings settings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION);
+
+    if (reference_combo_->currentIndex() >= 0) {
+        settings.setValue(SETTINGS_REFERENCE_UUID, reference_combo_->currentData().toString());
+        settings.setValue(SETTINGS_REFERENCE_NAME, reference_combo_->currentText());
+    }
+
+    if (target_combo_->currentIndex() >= 0) {
+        settings.setValue(SETTINGS_TARGET_UUID, target_combo_->currentData().toString());
+        settings.setValue(SETTINGS_TARGET_NAME, target_combo_->currentText());
+    }
+
+    settings.sync();
 }
 
 void SyncDock::stop_capture()
@@ -620,6 +689,8 @@ void SyncDock::start_measurement()
     progress_->setValue(0);
     set_status("Recording both sources…");
     confidence_label_->clear();
+
+    remember_source_selection();
 
     const QByteArray ref_uuid =
         reference_combo_->currentData().toString().toUtf8();
